@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tt-kernel"
+version = "0.1.0"
+description = "Publish and pull precompiled tt-metal kernel caches over Hugging Face Hub"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Tenstorrent" }]
+keywords = ["tenstorrent", "tt-metal", "ttnn", "kernel-cache", "huggingface"]
+dependencies = [
+    "huggingface_hub>=0.23",
+    "typer>=0.12",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+tt-kernel = "tt_kernel.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tt_kernel = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
