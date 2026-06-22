@@ -72,13 +72,13 @@ def push(
     ),
 ) -> None:
     """Package the local kernel cache for one build_key and publish it."""
-    cache_root = cache.resolve_cache_root(cache_dir)
+    out_root = cache.resolve_out_root(cache_dir)
     try:
-        key = cache.select_build_key(cache_root, build_key)
+        key = cache.select_build_key(out_root, build_key)
     except (FileNotFoundError, ValueError) as exc:
         raise _err(str(exc))
 
-    subtree = cache.build_key_path(cache_root, key)
+    subtree = cache.build_key_path(out_root, key)
     typer.echo(f"Packaging build_key {key} from {subtree}")
 
     dev = metal.detect_device(arch_override=arch)
@@ -170,8 +170,8 @@ def pull(
                 typer.secho(f"  {p}", fg=typer.colors.RED)
             raise _err(f"Integrity check failed ({len(problems)} problem(s)).")
 
-        cache_root = cache.resolve_cache_root(cache_dir)
-        target = cache.install_subtree(staged, cache_root, manifest.build_key)
+        out_root = cache.resolve_out_root(cache_dir)
+        target = cache.install_subtree(staged, out_root, manifest.build_key)
 
     localdb.record(
         repo_id,
@@ -180,7 +180,7 @@ def pull(
             "build_key": manifest.build_key,
             "arch": manifest.arch,
             "tt_metal_version": manifest.tt_metal_version,
-            "cache_root": str(cache_root),
+            "out_root": out_root,
             "installed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         },
     )
@@ -248,8 +248,11 @@ def rm(
     entry = localdb.get(repo_id)
     if not entry:
         raise _err(f"{repo_id} is not recorded as installed.")
-    cache_root = cache.resolve_cache_root(cache_dir or entry.get("cache_root"))
-    removed = cache.remove_subtree(cache_root, int(entry["build_key"]))
+    # The stored out_root is already a full prefix; only re-resolve if --cache-dir given.
+    out_root = cache.resolve_out_root(cache_dir) if cache_dir else (
+        entry.get("out_root") or cache.resolve_out_root(None)
+    )
+    removed = cache.remove_subtree(out_root, int(entry["build_key"]))
     localdb.remove(repo_id)
     if removed:
         typer.secho(f"✓ Removed {repo_id} (build_key {entry['build_key']})", fg=typer.colors.GREEN)

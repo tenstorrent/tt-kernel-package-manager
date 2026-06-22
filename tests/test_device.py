@@ -42,6 +42,29 @@ def test_parse_snapshot_empty():
     assert device._parse_snapshot({}).arch is None
 
 
+def test_parse_snapshot_tt_smi_5x_blackhole():
+    # Real shape from tt-smi 5.2.0 on a Blackhole p150a board.
+    snap = {
+        "device_info": [
+            {
+                "board_info": {"board_type": "p150a", "bus_id": "0000:09:00.0"},
+                "smbus_telem": {"HARVESTING_STATE": "0x0"},
+            }
+        ]
+    }
+    info = device._parse_snapshot(snap)
+    assert info.arch == "blackhole"
+    assert info.device_count == 1
+    assert info.harvesting_mask == 0
+
+
+def test_board_type_to_arch():
+    assert device.normalize_arch("p150a") == "blackhole"
+    assert device.normalize_arch("p100") == "blackhole"
+    assert device.normalize_arch("n300") == "wormhole_b0"
+    assert device.normalize_arch("e150") == "grayskull"
+
+
 def test_detect_env_fallback(monkeypatch):
     monkeypatch.setattr(device, "_run_tt_smi_snapshot", lambda: None)
     monkeypatch.setenv("ARCH_NAME", "wormhole_b0")

@@ -27,11 +27,31 @@ _ARCH_ALIASES = {
     "gs": "grayskull",
 }
 
+# tt-smi's snapshot reports the marketing board_type (e.g. "p150a"), not the arch.
+# Map board prefixes to ARCH_NAME. Blackhole = p100/p150/p300 boards; Wormhole =
+# n150/n300 boards; Grayskull = e75/e150/e300 boards.
+_BOARD_ARCH_PREFIXES = (
+    ("p100", "blackhole"),
+    ("p150", "blackhole"),
+    ("p300", "blackhole"),
+    ("n150", "wormhole_b0"),
+    ("n300", "wormhole_b0"),
+    ("e75", "grayskull"),
+    ("e150", "grayskull"),
+    ("e300", "grayskull"),
+)
+
 
 def normalize_arch(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
-    return _ARCH_ALIASES.get(value.strip().lower(), value.strip().lower())
+    v = value.strip().lower()
+    if v in _ARCH_ALIASES:
+        return _ARCH_ALIASES[v]
+    for prefix, arch in _BOARD_ARCH_PREFIXES:
+        if v.startswith(prefix):
+            return arch
+    return v
 
 
 @dataclass
@@ -45,23 +65,28 @@ class DeviceInfo:
 def _run_tt_smi_snapshot() -> Optional[dict]:
     """Run ``tt-smi`` and return its JSON snapshot, or None if unavailable.
 
-    tt-smi writes the snapshot to a file given by ``-f``; ``-s`` selects snapshot mode.
+    ``tt-smi -s`` dumps the snapshot to stdout (and overrides ``-f``), so we capture
+    stdout directly. ``--snapshot_no_tty`` forces clean JSON when not on a terminal.
     """
     exe = shutil.which("tt-smi")
     if not exe:
         return None
-    with tempfile.TemporaryDirectory() as td:
-        out = os.path.join(td, "snapshot.json")
-        for argv in ([exe, "-s", "-f", out], [exe, "--snapshot", "-f", out]):
-            try:
-                subprocess.run(argv, capture_output=True, timeout=30, check=True)
-            except (subprocess.SubprocessError, OSError):
-                continue
-            try:
-                with open(out, "r") as fh:
-                    return json.load(fh)
-            except (OSError, json.JSONDecodeError):
-                continue
+    for argv in ([exe, "-s", "--snapshot_no_tty"], [exe, "-s"]):
+        try:
+            proc = subprocess.run(argv, capture_output=True, timeout=30, text=True)
+        except (subprocess.SubprocessError, OSError):
+            continue
+        out = (proc.stdout or "").strip()
+        if not out:
+            continue
+        # Be tolerant of any leading non-JSON banner lines.
+        start = out.find("{")
+        if start == -1:
+            continue
+        try:
+            return json.loads(out[start:])
+        except json.JSONDecodeError:
+            continue
     return None
 
 
@@ -87,6 +112,18 @@ def _parse_snapshot(snap: dict) -> DeviceInfo:
     arch = normalize_arch(raw_arch)
 
     harvest = _extract_harvesting(first)
+    if harvest is None:
+        # tt-smi 5.x reports it under smbus_telem as a hex string.
+        telem = first.get("smbus_telem")
+        if isinstance(telem, dict):
+            hv = telem.get("HARVESTING_STATE")
+            if isinstance(hv, str):
+                try:
+                    harvest = int(hv, 0)
+                except ValueError:
+                    harvest = None
+            elif isinstance(hv, int):
+                harvest = hv
 
     return DeviceInfo(
         arch=arch,
