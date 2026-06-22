@@ -67,3 +67,37 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e ".[test]"
 pytest
 ```
+
+## Testing without hardware
+
+You don't need a Tenstorrent card or a tt-metal build to exercise the full
+push/pull round-trip — generate a synthetic cache and stamp the version by hand:
+
+```bash
+# 1. Make fake cache data laid out like a real tt-metal cache
+scripts/make_test_cache.sh /tmp/ttk-test-cache 4242
+
+# 2. Auth (use your own current HF token)
+export HF_TOKEN=hf_...
+tt-kernel login
+
+# 3. Publish it — --arch and --tt-metal-version stand in for hardware/build detection
+tt-kernel push <you>/kernel-selftest --private \
+  --cache-dir /tmp/ttk-test-cache --arch blackhole \
+  --tt-metal-version v0.99-test --model google/gemma-test
+
+# 4. Inspect + compatibility verdict
+tt-kernel info <you>/kernel-selftest --arch blackhole
+
+# 5. Pull into a DIFFERENT empty cache dir (simulates another machine)
+tt-kernel pull <you>/kernel-selftest --cache-dir /tmp/ttk-restore --arch blackhole
+diff -r /tmp/ttk-test-cache/4242 /tmp/ttk-restore/4242 && echo "round-trip OK"
+
+# 6. Local bookkeeping + teardown
+tt-kernel list
+tt-kernel rm <you>/kernel-selftest --cache-dir /tmp/ttk-restore
+```
+
+Try the guard rails too: `tt-kernel pull ... --arch wormhole_b0` fails fatally
+(wrong ISA), and a `--tt-metal-version` that differs from the bundle's blocks the
+install until you add `--force`.

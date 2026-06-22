@@ -67,6 +67,9 @@ def push(
     arch: Optional[str] = typer.Option(None, "--arch", help="Override arch detection."),
     num_hw_cqs: Optional[int] = typer.Option(None, help="Hardware command queues used (default 1)."),
     name: Optional[str] = typer.Option(None, help="Bundle name (defaults to the repo name)."),
+    tt_metal_version: Optional[str] = typer.Option(
+        None, "--tt-metal-version", help="Override the detected tt-metal version (e.g. for testing)."
+    ),
 ) -> None:
     """Package the local kernel cache for one build_key and publish it."""
     cache_root = cache.resolve_cache_root(cache_dir)
@@ -79,11 +82,11 @@ def push(
     typer.echo(f"Packaging build_key {key} from {subtree}")
 
     dev = metal.detect_device(arch_override=arch)
-    version = metal.resolve_version()
+    version = tt_metal_version or metal.resolve_version()
     if not version:
         raise _err(
-            "Could not resolve tt-metal version. Set TT_METAL_HOME or install ttnn so "
-            "the consumer can match it. (Re-run with the env set.)"
+            "Could not resolve tt-metal version. Set TT_METAL_HOME, install ttnn, or pass "
+            "--tt-metal-version so the consumer can match it."
         )
     if not dev.arch:
         raise _err("Could not detect arch. Pass --arch (blackhole | wormhole_b0 | ...).")
