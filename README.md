@@ -1,7 +1,11 @@
 # tt-kernel
 
-Publish and pull **precompiled tt-metal kernel caches** over Hugging Face Hub, so a
-model's first run on Tenstorrent hardware is a cache **hit** instead of a slow JIT
+A wrapper around Hugging Face that lets users upload and distribute versioned kernels
+and configs for Tenstorrent, so you can pull a pre-tuned cache and run models in known-good
+configurations.
+
+Concretely: it publishes and pulls **precompiled tt-metal kernel caches** over Hugging Face
+Hub, so a model's first run on Tenstorrent hardware is a cache **hit** instead of a slow JIT
 recompile.
 
 tt-metal JIT-compiles every kernel on first run and caches the RISC-V binaries on disk.
