@@ -112,6 +112,11 @@ def _sha256_file(path: Path, chunk: int = 1 << 20) -> str:
     return h.hexdigest()
 
 
+def sha256_file(path: Path) -> str:
+    """Public alias of the streaming sha256 helper (used to index shipped wheels)."""
+    return _sha256_file(path)
+
+
 def index_subtree(subtree: Path) -> List[FileEntry]:
     """Walk a ``<build_key>/`` subtree, returning a sha256 index of every file.
 

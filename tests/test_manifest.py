@@ -1,6 +1,14 @@
 """Compatibility comparison matrix — the correctness core."""
 
-from tt_kernel.manifest import BuildKeyInputs, Manifest, Producer, compare
+from tt_kernel.manifest import (
+    BuildKeyInputs,
+    Manifest,
+    Producer,
+    RunnerPayload,
+    WeightsRef,
+    compare,
+    runner_version_advisory,
+)
 from tt_kernel.metal import LocalEnv
 
 
@@ -89,3 +97,63 @@ def test_unknown_local_fields_do_not_block():
     # When detection fails (arch/version unknown), we don't fabricate mismatches.
     report = compare(_manifest(), _env(arch=None, tt_metal_version=None, device_count=0))
     assert report.compatible
+
+
+# --------------------------------------------------------------------------- schema v2
+
+_V1_JSON = """
+{
+  "schema_version": "1",
+  "name": "legacy",
+  "tt_metal_version": "v1.0.0-abc",
+  "arch": "blackhole",
+  "device_count": 1,
+  "build_key": 12345,
+  "kernel_count": 0,
+  "files": [],
+  "producer": {"tt_kernel_version": "0.1.0", "created_at": "now"}
+}
+"""
+
+
+def test_v1_manifest_parses_with_no_runtime_payload():
+    m = Manifest.from_json(_V1_JSON)
+    assert m.schema_version == "1"  # preserved on read
+    assert m.runner is None
+    assert m.weights is None
+
+
+def test_v2_manifest_roundtrip():
+    m = _manifest(
+        runner=RunnerPayload(spec="pkg.mod:Runner", wheels=["r-0.1-py3-none-any.whl"],
+                             entry_point="qwen36"),
+        weights=WeightsRef(repo_id="org/model", revision="main"),
+    )
+    assert Manifest.from_json(m.to_json()) == m
+
+
+def test_compare_verdict_ignores_runtime_payload():
+    # The kernel verdict must be byte-identical whether or not runner/weights are present.
+    plain = compare(_manifest(), _env())
+    with_payload = compare(
+        _manifest(runner=RunnerPayload(spec="pkg:Runner"), weights=WeightsRef(repo_id="org/m")),
+        _env(),
+    )
+    assert plain == with_payload
+
+
+def test_advisory_none_without_payload():
+    assert runner_version_advisory(_manifest(), _env(tt_metal_version="v2")) is None
+
+
+def test_advisory_none_when_versions_match():
+    m = _manifest(runner=RunnerPayload(spec="pkg:Runner"))
+    assert runner_version_advisory(m, _env()) is None
+
+
+def test_advisory_nonfatal_on_mismatch():
+    m = _manifest(tt_metal_version="v1", weights=WeightsRef(repo_id="org/m"))
+    adv = runner_version_advisory(m, _env(tt_metal_version="v2"))
+    assert adv is not None
+    assert adv.fatal is False
+    assert adv.field == "runner_tt_metal_version"

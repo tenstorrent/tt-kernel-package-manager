@@ -1,0 +1,213 @@
+# Authoring a runner that works with `tt-kernel`
+
+A v2 `tt-kernel` bundle can carry three things so that a single `tt-kernel pull` gets a
+model running: the **compiled kernel cache**, the **model weights** (a reference to an HF
+repo), and a **Python runner** — the code that actually executes the model's tt-nn graph.
+
+This guide is for the person *producing* a bundle. It explains how to write and package
+the runner so the package manager can install it and the dispatch serving layer can select
+and drive it. Get these rules right and your model is `pull`-and-serve for everyone else.
+
+> The runtime contract below mirrors the dispatch serving layer's `BaseRunner`
+> (`tt-inference-server`: `tt_inference_server/dispatch/docs/custom_runners.md`). `tt-kernel`
+> itself never imports your runner — it only ships the wheel and records the selector string.
+> The contract is the only shared surface.
+
+---
+
+## 1. Implement the runner contract
+
+Your runner is a plain Python class. It is **duck-typed** — you do not subclass anything.
+It must expose exactly three methods and three attributes:
+
+```python
+class MyRunner:
+    # --- required attributes, set in __init__ ---
+    _tokenizer: object   # a transformers-like tokenizer
+    _listed: bool        # True for a known/validated model; else False
+    _community: bool     # True if unverified/community (drives the serve "community" tag)
+
+    # --- required methods ---
+    def generate(self, prompt: str, max_new_tokens: int = 50,
+                 temperature: float = 1.0, chat: bool = True) -> str: ...
+
+    def generate_stream(self, prompt: str, max_new_tokens: int = 50,
+                        temperature: float = 1.0, chat: bool = True):
+        # yield decoded text deltas (str), one per step;
+        # the FINAL yielded item MUST be a dict:
+        #   {"finish_reason": str, "prompt_tokens": int, "completion_tokens": int}
+        ...
+
+    def benchmark(self, prompt: str, n_tokens: int = 50) -> tuple[float, str]:
+        return (tokens_per_second, output_text)
+```
+
+`generate_stream` is what the OpenAI-compatible server drives for both streaming and
+non-streaming responses, so make sure the final usage dict is correct.
+
+### Constructor
+
+The serving layer constructs your runner as:
+
+```python
+MyRunner(model_path, device, max_seq=..., unsafe=..., force_novel=...,
+         trace_region_size=..., device_ids=...)
+```
+
+Declare only the keyword args you use (or accept `**kwargs` and ignore the rest). `model_path`
+is the local weights directory `tt-kernel pull` downloaded for you.
+
+### Device ownership (mesh runners)
+
+If your model needs a device topology dispatch doesn't open for you — e.g. a 1×1 **mesh** —
+set `MANAGES_OWN_DEVICE = True`. Then `device` is `None` and you open/own the device yourself:
+
+```python
+class MyRunner:
+    MANAGES_OWN_DEVICE = True
+    def __init__(self, model_path, device, **kwargs):
+        import ttnn, atexit
+        self.mesh = ttnn.open_mesh_device(...)
+        atexit.register(ttnn.close_mesh_device, self.mesh)   # <-- REQUIRED
+        ...
+```
+
+**Closing the device cleanly is mandatory.** Serving runs one model per process and swaps
+models by restarting; an ungraceful teardown can leave a locked device mutex
+(`/dev/shm/tt_device_*`) that wedges the card until a manual `tt-smi -r`. Register an
+`atexit` close (or close in your own lifecycle) so the next model starts on a pristine card.
+
+---
+
+## 2. Make it a self-contained, renamespaced package
+
+The wheel you ship is installed with `pip install --no-deps` into the serving environment,
+so it must stand on its own:
+
+- **No `ttnn` / tt-metal in your dependencies.** They are the platform — already present in
+  the serving venv, and never vendored. `import ttnn` is fine; depending on it is not.
+- **Renamespace away from the tt-metal tree.** If your runner currently lives inside a
+  tt-metal checkout with absolute imports like `from models.experimental.foo...`, move it
+  under your own top-level package (e.g. `ttrunner_mymodel/`) with package-relative imports.
+  Two runner packages that both vendor a `models/` tree will collide on that namespace and
+  break multi-model installs.
+- **Ship only what's needed.** Trace the import graph from your runner class and include only
+  the modules it actually reaches. Drop unrelated models/utilities.
+- **Pin a Python version range, not an exact build,** if you declare one.
+
+Build it like any wheel:
+
+```bash
+python -m build --wheel        # or: pip wheel . --no-deps -w dist/
+# -> dist/ttrunner_mymodel-<ver>-py3-none-any.whl
+```
+
+### Optional: register an entry point for auto-discovery
+
+If you declare the `tt_inference_server.runners` entry point, dispatch can auto-select your
+runner from the model's HF config — `serve <model>` with no `--runner` flag just works:
+
+```toml
+# pyproject.toml of your runner package
+[project.entry-points."tt_inference_server.runners"]
+my_model = "ttrunner_mymodel.runner:MyRunner"
+```
+
+Add a class hook so dispatch knows which models you claim (priority: `claims()` >
+`supported_architectures` > `supported_model_types`):
+
+```python
+class MyRunner:
+    supported_model_types = {"qwen3_5_moe"}
+    # or, for finer control:
+    # @classmethod
+    # def claims(cls, hf_config): return hf_config.model_type == "qwen3_5_moe"
+```
+
+Even without an entry point, the explicit `--runner-spec` you record in the bundle (next
+section) always works.
+
+---
+
+## 3. Versioning — the rule that makes or breaks a pull
+
+Your runner calls a specific `ttnn` API, and the kernel cache in the same bundle was compiled
+from that same tt-metal build. They are **co-versioned**: the bundle's single
+`tt_metal_version` gates both. On `pull`:
+
+- **Kernel cache**: a version mismatch is a hard block (mismatched binaries are useless).
+- **Runner + weights**: install anyway, with a loud warning that it won't run until the
+  serving environment matches.
+
+`tt-kernel` does **not** fix a mismatch — that is the user's blocker to resolve (install the
+matching tt-metal/ttnn). So: **build, push, and serve in environments with the same tt-metal
+build.** The simplest reliable path is to produce the bundle on the same build you serve on.
+
+---
+
+## 4. Push a v2 bundle
+
+From a machine whose kernel cache is populated for your model (run it once to JIT-compile),
+with your wheel built:
+
+```bash
+tt-kernel push <ns>/<model>-blackhole --private \
+  --python-package dist/ttrunner_mymodel-0.1-py3-none-any.whl \
+  --runner-spec ttrunner_mymodel.runner:MyRunner \
+  --entry-point my_model \
+  --weights <hf-org>/<hf-model>
+```
+
+- `--python-package` (repeatable) ships your wheel under `python/` in the bundle and
+  integrity-indexes it.
+- `--runner-spec module:Class` is the selector dispatch uses; **required** whenever you ship a
+  wheel. Must be `module:Class` (or `module.Class`).
+- `--entry-point` is informational/auto-discovery; optional.
+- `--weights` records the HF model repo `pull` will download. Add `--weights-revision`,
+  `--weights-allow`, `--weights-ignore` to scope it.
+
+`--tt-metal-version` / `--arch` overrides exist for testing as with kernel-only bundles.
+
+---
+
+## 5. What the consumer gets
+
+```bash
+tt-kernel pull <ns>/<model>-blackhole
+```
+
+installs the kernel cache, `pip install --no-deps` your wheel, downloads the weights, records
+the binding, and prints the exact command to serve:
+
+```
+python -m tt_inference_server.dispatch.serve serve --unsafe \
+    --runner ttrunner_mymodel.runner:MyRunner <weights-path>
+```
+
+Skip flags (`--no-python`, `--no-weights`, `--kernels-only`) let users install parts. A
+re-pull is idempotent.
+
+---
+
+## Authoring checklist
+
+- [ ] Runner exposes `generate` / `generate_stream` / `benchmark` and sets `_tokenizer` /
+      `_listed` / `_community` in `__init__`.
+- [ ] `generate_stream` yields str deltas, final item is the usage dict.
+- [ ] Constructor takes `(model_path, device, **kwargs)`.
+- [ ] If a mesh/own device: `MANAGES_OWN_DEVICE = True` **and** a clean `atexit` close.
+- [ ] Wheel is renamespaced (no `from models...`), self-contained, `ttnn` NOT a dependency.
+- [ ] (Optional) `tt_inference_server.runners` entry point + a `claims()`/`supported_*` hook.
+- [ ] Bundle built and served on the **same tt-metal build** (co-versioned with the kernels).
+- [ ] `tt-kernel push` run with `--python-package` + `--runner-spec` (+ `--weights`).
+
+## Common pitfalls
+
+- **`from models...` imports** — break on install; renamespace.
+- **Depending on `ttnn`/tt-metal in the wheel** — `--no-deps` ignores it, or worse, a plain
+  install pulls a conflicting `ttnn` from PyPI. Keep them out of `dependencies`.
+- **`--python-package` without `--runner-spec`** — rejected at push; the wheel is unusable
+  without a selector.
+- **Producing the bundle on a different tt-metal build than you serve on** — runner won't
+  import; the warning is honest, not a fix.
+- **Not closing a mesh device** — wedges the card for the next model in a hot-swap.

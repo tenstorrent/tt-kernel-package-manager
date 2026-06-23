@@ -14,7 +14,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 
 class FileEntry(BaseModel):
@@ -50,12 +50,43 @@ class Producer(BaseModel):
     hostname: Optional[str] = None
 
 
+class RunnerPayload(BaseModel):
+    """A self-contained Python runner wheel shipped inside the bundle (schema v2).
+
+    The wheel(s) are stored under ``python/`` in the bundle and indexed in
+    ``Manifest.files`` (path prefix ``python/``) so the existing integrity check
+    covers them. ``spec`` is the opaque ``"module:Class"`` string the dispatch
+    serving layer selects via ``serve --runner`` / ``load_model(runner=...)``;
+    tt-kernel records it but never imports it.
+    """
+
+    spec: str  # "module:Class" for dispatch --runner
+    wheels: List[str] = Field(default_factory=list)  # filenames under python/ in the bundle
+    entry_point: Optional[str] = None  # name registered under tt_inference_server.runners
+    requires_python: Optional[str] = None  # informational
+
+
+class WeightsRef(BaseModel):
+    """Where to fetch model weights from the Hub (schema v2).
+
+    Promotes the old informational ``Manifest.model`` into an actionable pull. The
+    referenced repo is a normal HF model repo, downloaded separately from the
+    kernel bundle.
+    """
+
+    repo_id: str
+    revision: Optional[str] = None
+    allow_patterns: Optional[List[str]] = None
+    ignore_patterns: Optional[List[str]] = None
+    repo_type: str = "model"
+
+
 class Manifest(BaseModel):
     """Root document of a bundle (``tt_kernel_manifest.json``)."""
 
     schema_version: str = SCHEMA_VERSION
     name: str
-    model: Optional[str] = None  # informational
+    model: Optional[str] = None  # informational human label (see `weights` for the actionable ref)
     tt_metal_version: str  # MUST match local (per-kernel hash dependency)
     arch: str  # blackhole | wormhole_b0 | ...
     device_count: int = 1
@@ -64,6 +95,9 @@ class Manifest(BaseModel):
     kernel_count: int = 0
     files: List[FileEntry] = Field(default_factory=list)
     producer: Producer
+    # --- schema v2 (optional; absent in v1 bundles) ---
+    runner: Optional[RunnerPayload] = None
+    weights: Optional[WeightsRef] = None
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)
@@ -167,3 +201,24 @@ def compare(manifest: Manifest, local: "LocalEnv") -> CompatibilityReport:  # no
         )
 
     return CompatibilityReport(compatible=not issues, issues=issues)
+
+
+def runner_version_advisory(manifest: Manifest, local: "LocalEnv") -> Optional[Incompatibility]:  # noqa: F821
+    """Non-fatal version check for the runner wheel + weights (schema v2).
+
+    Unlike the kernel ``compare()`` gate (which hard-blocks a tt_metal_version
+    mismatch because mismatched kernels are useless), the runner wheel and weights
+    are reusable and not as hard-locked, so a mismatch installs anyway with a loud
+    warning — the user resolves the version blocker themselves. Returns an
+    informational ``Incompatibility`` (always ``fatal=False``) or None.
+    """
+    if manifest.runner is None and manifest.weights is None:
+        return None
+    if local.tt_metal_version and manifest.tt_metal_version != local.tt_metal_version:
+        return Incompatibility(
+            field="runner_tt_metal_version",
+            expected=manifest.tt_metal_version,
+            detected=local.tt_metal_version,
+            fatal=False,
+        )
+    return None

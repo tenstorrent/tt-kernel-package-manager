@@ -12,8 +12,13 @@ tt-metal JIT-compiles every kernel on first run and caches the RISC-V binaries o
 Those binaries are deterministic for a fixed `(tt-metal build, arch, device config,
 compile-time args)` tuple. `tt-kernel` packages that cache, publishes it as a Hugging
 Face model repo addressed `namespace/name`, and on pull validates compatibility before
-installing it into the local cache. **Only the kernel cache + a compatibility manifest
-are shipped — never model weights.**
+installing it into the local cache.
+
+A bundle can also carry a **Python runner** (a wheel, pip-installed on pull) and a
+**weights reference** (an HF model repo to download), so a single `tt-kernel pull` gets a
+model fully installed and ready to serve. Even then, **weights are never stored in the
+bundle** — only a reference to their HF repo. To write a runner that works with the package
+manager, see **[docs/authoring_runners.md](docs/authoring_runners.md)**.
 
 ## Install
 
@@ -35,6 +40,33 @@ tt-kernel rm    you/smallmodel-blackholex1        # remove an installed cache su
 
 Typical workflow: run your model once to populate the cache, `push`, then on another
 matching host `pull` and re-run — the kernels load from cache with no recompile.
+
+## Bundling a runnable model (kernels + runner + weights)
+
+A v2 bundle adds a self-contained runner wheel and a weights reference so one `pull`
+installs everything. **Producing the runner is governed by
+[docs/authoring_runners.md](docs/authoring_runners.md)** — read it before pushing one; a
+runner that doesn't follow the contract won't install or serve.
+
+```bash
+# Producer (on a host whose kernel cache is populated, with the runner wheel built):
+tt-kernel push you/mymodel-blackhole --private \
+  --python-package dist/ttrunner_mymodel-0.1-py3-none-any.whl \
+  --runner-spec ttrunner_mymodel.runner:MyRunner \
+  --weights some-org/mymodel
+
+# Consumer:
+tt-kernel pull you/mymodel-blackhole       # kernels + pip-install runner + download weights
+#   -> prints the exact `serve --unsafe --runner ...` command to run
+```
+
+`pull` partial-install flags: `--no-python`, `--no-weights`, `--kernels-only`,
+`--models-dir DIR`, `--python PATH` (target interpreter for the runner install).
+
+**Version coupling:** the runner and the kernels are co-versioned (the kernels were compiled
+from the tt-metal build whose `ttnn` the runner calls). A kernel-version mismatch hard-blocks;
+the runner/weights install anyway with a warning. `tt-kernel` does not fix a mismatch — build
+and serve on the same tt-metal build. See the guide for details.
 
 ## How compatibility is enforced
 
