@@ -1,4 +1,4 @@
-"""Install the *runtime* half of a v2 bundle: the Python runner wheel and the weights.
+"""Install the *runtime* half of a bundle: the Python runner wheel and the weights.
 
 This module deliberately holds everything that is NOT kernel-cache plumbing (cache.py)
 or bundle-repo I/O (hub.py): downloading an arbitrary HF *model* repo, pip-installing
@@ -120,6 +120,32 @@ def dispatch_available() -> bool:
         return False
 
 
+def runner_spec_importable(spec: str, python: Optional[str] = None) -> bool:
+    """Whether a *reference* runner's module is importable in the target interpreter.
+
+    Used by ``pull`` to verify a not-shipped (reference) runner is actually present
+    before claiming the bundle is ready. The module is the part of ``spec`` before the
+    ``:`` (``"pkg.mod:Runner"``) or the dotted prefix (``"pkg.mod.Runner"``). DETECTION
+    only — ``find_spec`` never imports the module. Mirrors ``ttnn_importable``: checks
+    this process directly for the default interpreter, else shells out.
+    """
+    module = spec.split(":", 1)[0] if ":" in spec else spec.rsplit(".", 1)[0]
+    if python is None or python == sys.executable:
+        try:
+            return importlib.util.find_spec(module) is not None
+        except (ImportError, ValueError):
+            return False
+    try:
+        proc = subprocess.run(
+            [python, "-c", "import importlib.util,sys;"
+             f"sys.exit(0 if importlib.util.find_spec({module!r}) else 1)"],
+            timeout=30,
+        )
+        return proc.returncode == 0
+    except (subprocess.SubprocessError, OSError):
+        return False
+
+
 def serve_command(runner_spec: str, weights_path: Path) -> str:
     """The exact ready-to-run line for dispatch's OpenAI-compatible server."""
     return (
@@ -133,6 +159,7 @@ __all__ = [
     "download_weights",
     "pip_install_wheels",
     "ttnn_importable",
+    "runner_spec_importable",
     "dispatch_available",
     "serve_command",
 ]

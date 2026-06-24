@@ -99,9 +99,11 @@ def test_unknown_local_fields_do_not_block():
     assert report.compatible
 
 
-# --------------------------------------------------------------------------- schema v2
+# --------------------------------------------------------------------------- schema gate + runner modes
 
-_V1_JSON = """
+import pytest
+
+_LEGACY_JSON = """
 {
   "schema_version": "1",
   "name": "legacy",
@@ -116,19 +118,29 @@ _V1_JSON = """
 """
 
 
-def test_v1_manifest_parses_with_no_runtime_payload():
-    m = Manifest.from_json(_V1_JSON)
-    assert m.schema_version == "1"  # preserved on read
-    assert m.runner is None
-    assert m.weights is None
+def test_legacy_schema_is_rejected():
+    # tt-kernel is pre-release: exactly one supported schema, no silent half-reads.
+    with pytest.raises(ValueError, match="schema_version"):
+        Manifest.from_json(_LEGACY_JSON)
 
 
-def test_v2_manifest_roundtrip():
+def test_manifest_roundtrip_with_payload():
     m = _manifest(
         runner=RunnerPayload(spec="pkg.mod:Runner", wheels=["r-0.1-py3-none-any.whl"],
                              entry_point="qwen36"),
         weights=WeightsRef(repo_id="org/model", revision="main"),
     )
+    assert Manifest.from_json(m.to_json()) == m
+
+
+def test_packaged_runner_is_packaged():
+    assert RunnerPayload(spec="pkg.mod:Runner", wheels=["r.whl"]).is_packaged is True
+
+
+def test_reference_runner_is_not_packaged_and_roundtrips():
+    r = RunnerPayload(spec="pkg.mod:Runner", source="pip:fake-runner")
+    assert r.is_packaged is False
+    m = _manifest(runner=r)
     assert Manifest.from_json(m.to_json()) == m
 
 

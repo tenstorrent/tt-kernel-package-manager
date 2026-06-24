@@ -25,8 +25,13 @@ WHEEL_NAME = "fake_runner-0.1-py3-none-any.whl"
 
 
 def _populate_bundle(dest: Path, *, with_runner=True, with_weights=True,
-                     version="v1.0.0-abc", corrupt_wheel=False) -> Manifest:
-    """Lay out a synthetic bundle under ``dest`` and return its matching manifest."""
+                     version="v1.0.0-abc", corrupt_wheel=False,
+                     reference_runner=False) -> Manifest:
+    """Lay out a synthetic bundle under ``dest`` and return its matching manifest.
+
+    ``reference_runner=True`` records a runner spec with no shipped wheel (reference mode);
+    ``with_runner=True`` (default) ships a packaged wheel.
+    """
     # kernel subtree under <build_key>/
     sub = dest / str(BUILD_KEY)
     (sub / "kernels" / "reader" / "tensix").mkdir(parents=True)
@@ -36,7 +41,10 @@ def _populate_bundle(dest: Path, *, with_runner=True, with_weights=True,
     files = cache.index_subtree(sub)
 
     runner_block = None
-    if with_runner:
+    if reference_runner:
+        runner_block = RunnerPayload(spec="pkg.mod:Runner", entry_point="qwen36",
+                                     source="pip:fake-runner")
+    elif with_runner:
         (dest / "python").mkdir()
         wheel = dest / "python" / WHEEL_NAME
         wheel.write_bytes(b"PK\x03\x04 fake wheel bytes")
@@ -51,7 +59,7 @@ def _populate_bundle(dest: Path, *, with_runner=True, with_weights=True,
     weights_block = WeightsRef(repo_id="org/model") if with_weights else None
 
     m = Manifest(
-        name="demo", model="org/model", tt_metal_version=version, arch="blackhole",
+        name="demo", tt_metal_version=version, arch="blackhole",
         device_count=1, build_key=BUILD_KEY, kernel_count=cache.count_kernels(sub),
         files=files, producer=Producer(tt_kernel_version="0.1.0", created_at="now"),
         runner=runner_block, weights=weights_block,
@@ -73,6 +81,7 @@ def wired(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "download_weights",
                         lambda w, dest: calls["weights"].append(w.repo_id) or dest)
     monkeypatch.setattr(runtime, "ttnn_importable", lambda python=None: True)
+    monkeypatch.setattr(runtime, "runner_spec_importable", lambda spec, python=None: True)
     monkeypatch.setattr(runtime, "dispatch_available", lambda: True)
 
     state = {"opts": {}}
@@ -160,7 +169,8 @@ def test_pull_version_mismatch_warns_but_installs_with_force(wired):
     assert "will NOT run until" in res.output
 
 
-def test_pull_v1_bundle_back_compat(wired):
+def test_pull_kernels_only_bundle(wired):
+    # A bundle with neither runner nor weights — a pure warm compile-cache share.
     calls, state, cache_dir = wired
     state["opts"] = {"with_runner": False, "with_weights": False}
     res = _invoke(cache_dir)
@@ -168,3 +178,32 @@ def test_pull_v1_bundle_back_compat(wired):
     assert calls["pip"] == []
     assert calls["weights"] == []
     assert "✓ Installed org/demo-bh" in res.output
+
+
+def test_pull_reference_runner_resolves_without_pip(wired):
+    # Reference runner: nothing is pip-installed, but a resolvable spec is "ready",
+    # so the serve command still prints and weights still download.
+    calls, state, cache_dir = wired
+    state["opts"] = {"reference_runner": True}
+    res = _invoke(cache_dir)
+    assert res.exit_code == 0, res.output
+    assert calls["pip"] == []  # reference => nothing shipped to install
+    assert calls["weights"] == ["org/model"]
+    assert "reference; not shipped" in res.output
+    assert "serve --unsafe --runner pkg.mod:Runner" in res.output
+    rec = localdb.get("org/demo-bh")
+    assert rec["python_installed"] is False
+    assert rec["runner_spec"] == "pkg.mod:Runner"
+
+
+def test_pull_reference_runner_unresolvable_is_pending(monkeypatch, wired):
+    # If the reference runner isn't importable, it's reported pending (not installed),
+    # with its source — but the pull still succeeds (kernels + weights land).
+    calls, state, cache_dir = wired
+    monkeypatch.setattr(runtime, "runner_spec_importable", lambda spec, python=None: False)
+    state["opts"] = {"reference_runner": True}
+    res = _invoke(cache_dir)
+    assert res.exit_code == 0, res.output
+    assert calls["pip"] == []
+    assert "pip:fake-runner" in res.output
+    assert "pending" in res.output.lower()

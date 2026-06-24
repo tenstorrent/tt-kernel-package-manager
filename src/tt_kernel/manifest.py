@@ -51,27 +51,38 @@ class Producer(BaseModel):
 
 
 class RunnerPayload(BaseModel):
-    """A self-contained Python runner wheel shipped inside the bundle (schema v2).
+    """The Python runner a bundle dispatches to. Two modes:
 
-    The wheel(s) are stored under ``python/`` in the bundle and indexed in
-    ``Manifest.files`` (path prefix ``python/``) so the existing integrity check
-    covers them. ``spec`` is the opaque ``"module:Class"`` string the dispatch
-    serving layer selects via ``serve --runner`` / ``load_model(runner=...)``;
-    tt-kernel records it but never imports it.
+    - **packaged**: ``wheels`` is non-empty — the wheel(s) are stored under ``python/``
+      in the bundle and indexed in ``Manifest.files`` (path prefix ``python/``) so the
+      existing integrity check covers them. ``pull`` pip-installs them. Fully
+      reproducible — the answer for a custom/hand-tuned runner.
+    - **reference**: ``wheels`` is empty — the runner is *not* shipped; the consumer is
+      expected to already have it (e.g. registered in ``tt_inference_server``) or to
+      install it from ``source``. ``pull`` verifies it resolves but installs nothing.
+
+    ``spec`` is the opaque ``"module:Class"`` string the dispatch serving layer selects
+    via ``serve --runner`` / ``load_model(runner=...)``; tt-kernel records it but never
+    imports it.
     """
 
     spec: str  # "module:Class" for dispatch --runner
-    wheels: List[str] = Field(default_factory=list)  # filenames under python/ in the bundle
+    wheels: List[str] = Field(default_factory=list)  # filenames under python/; empty => reference
     entry_point: Optional[str] = None  # name registered under tt_inference_server.runners
+    source: Optional[str] = None  # where to get a reference (not-shipped) runner: pip name / git URL
     requires_python: Optional[str] = None  # informational
+
+    @property
+    def is_packaged(self) -> bool:
+        """True when the bundle ships the runner wheel(s); False => reference-only."""
+        return bool(self.wheels)
 
 
 class WeightsRef(BaseModel):
-    """Where to fetch model weights from the Hub (schema v2).
+    """Where to fetch model weights from the Hub.
 
-    Promotes the old informational ``Manifest.model`` into an actionable pull. The
-    referenced repo is a normal HF model repo, downloaded separately from the
-    kernel bundle.
+    The single, actionable record of which model a bundle targets: a normal HF model
+    repo, downloaded separately from the kernel bundle (skippable with ``--no-weights``).
     """
 
     repo_id: str
@@ -86,7 +97,6 @@ class Manifest(BaseModel):
 
     schema_version: str = SCHEMA_VERSION
     name: str
-    model: Optional[str] = None  # informational human label (see `weights` for the actionable ref)
     tt_metal_version: str  # MUST match local (per-kernel hash dependency)
     arch: str  # blackhole | wormhole_b0 | ...
     device_count: int = 1
@@ -95,7 +105,8 @@ class Manifest(BaseModel):
     kernel_count: int = 0
     files: List[FileEntry] = Field(default_factory=list)
     producer: Producer
-    # --- schema v2 (optional; absent in v1 bundles) ---
+    # Runtime payload (both optional): a runner to dispatch to (packaged or reference)
+    # and the model weights to fetch. Absent => a pure kernel (warm compile-cache) bundle.
     runner: Optional[RunnerPayload] = None
     weights: Optional[WeightsRef] = None
 
@@ -104,7 +115,20 @@ class Manifest(BaseModel):
 
     @classmethod
     def from_json(cls, text: str) -> "Manifest":
-        return cls.model_validate_json(text)
+        """Parse and validate a manifest, rejecting any unsupported schema version.
+
+        tt-kernel is pre-release: there is exactly one supported schema. A bundle from a
+        different (older/newer) schema is refused outright rather than silently
+        half-read — re-publish it with a matching tt-kernel.
+        """
+        m = cls.model_validate_json(text)
+        if m.schema_version != SCHEMA_VERSION:
+            raise ValueError(
+                f"Unsupported bundle schema_version {m.schema_version!r}; this tt-kernel "
+                f"requires schema {SCHEMA_VERSION!r}. Re-publish the bundle with a current "
+                "tt-kernel."
+            )
+        return m
 
     @property
     def total_size(self) -> int:
@@ -204,7 +228,7 @@ def compare(manifest: Manifest, local: "LocalEnv") -> CompatibilityReport:  # no
 
 
 def runner_version_advisory(manifest: Manifest, local: "LocalEnv") -> Optional[Incompatibility]:  # noqa: F821
-    """Non-fatal version check for the runner wheel + weights (schema v2).
+    """Non-fatal version check for the runner wheel + weights.
 
     Unlike the kernel ``compare()`` gate (which hard-blocks a tt_metal_version
     mismatch because mismatched kernels are useless), the runner wheel and weights

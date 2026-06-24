@@ -72,7 +72,6 @@ def push(
     private: bool = typer.Option(False, "--private/--public", help="Repo visibility."),
     cache_dir: Optional[str] = typer.Option(None, help="Override the tt-metal cache root."),
     build_key: Optional[int] = typer.Option(None, help="Which build_key subtree to publish."),
-    model: Optional[str] = typer.Option(None, help="Informational model id, e.g. google/gemma-..."),
     arch: Optional[str] = typer.Option(None, "--arch", help="Override arch detection."),
     num_hw_cqs: Optional[int] = typer.Option(None, help="Hardware command queues used (default 1)."),
     name: Optional[str] = typer.Option(None, help="Bundle name (defaults to the repo name)."),
@@ -80,10 +79,15 @@ def push(
         None, "--tt-metal-version", help="Override the detected tt-metal version (e.g. for testing)."
     ),
     python_package: Optional[List[str]] = typer.Option(
-        None, "--python-package", help="Path to a prebuilt runner wheel/sdist to ship (repeatable)."
+        None, "--python-package", help="Path to a prebuilt runner wheel/sdist to ship "
+        "(repeatable). Omit for a reference runner (--runner-spec only)."
     ),
     runner_spec: Optional[str] = typer.Option(
-        None, "--runner-spec", help="Runner as module:Class, recorded for dispatch --runner."
+        None, "--runner-spec", help="Runner as module:Class for dispatch --runner. With "
+        "--python-package it is packaged (shipped); alone it is a reference the consumer resolves."
+    ),
+    runner_source: Optional[str] = typer.Option(
+        None, "--runner-source", help="For a reference runner: where to get it (pip name / git URL)."
     ),
     entry_point: Optional[str] = typer.Option(
         None, "--entry-point", help="Entry-point name the wheel registers under tt_inference_server.runners."
@@ -97,9 +101,11 @@ def push(
 ) -> None:
     """Package the local kernel cache for one build_key and publish it.
 
-    A v2 bundle may also ship a self-contained runner wheel (--python-package +
-    --runner-spec) and a weights reference (--weights), so a single `tt-kernel pull`
-    installs kernels + runner + weights.
+    A bundle may also declare a runner and a weights reference (--weights) so a single
+    `tt-kernel pull` installs kernels + runner + weights. The runner is either *packaged*
+    (--python-package + --runner-spec: the wheel ships in the bundle) or a *reference*
+    (--runner-spec alone: the consumer already has it, or installs it from --runner-source).
+    Omit the runner entirely for a pure kernel (warm compile-cache) bundle.
     """
     # Validate runtime payload args before any device/cache work or upload.
     wheel_paths: List[Path] = []
@@ -116,6 +122,8 @@ def push(
         raise _err(f"--runner-spec {runner_spec!r} must be 'module:Class' (or 'module.Class').")
     if entry_point and not runner_spec:
         raise _err("--entry-point requires --runner-spec.")
+    if runner_source and not runner_spec:
+        raise _err("--runner-source requires --runner-spec (it says where to get the reference runner).")
 
     out_root = cache.resolve_out_root(cache_dir)
     try:
@@ -138,13 +146,15 @@ def push(
 
     files = cache.index_subtree(subtree)
 
-    # v2 runtime payload: index shipped wheels under python/ and build the runner/weights blocks.
+    # Runtime payload: build the runner block whenever a spec is given (packaged if wheels
+    # were supplied, reference otherwise) and index any shipped wheels under python/.
     runner_block: Optional[RunnerPayload] = None
-    if wheel_paths:
+    if runner_spec:
         runner_block = RunnerPayload(
             spec=runner_spec,
             wheels=[p.name for p in wheel_paths],
             entry_point=entry_point,
+            source=runner_source,
         )
         files = files + [
             FileEntry(path=f"python/{p.name}", sha256=cache.sha256_file(p), size=p.stat().st_size)
@@ -161,7 +171,6 @@ def push(
 
     manifest = Manifest(
         name=name or repo_id.split("/")[-1],
-        model=model or weights,
         tt_metal_version=version,
         arch=dev.arch,
         device_count=dev.device_count or 1,
@@ -218,7 +227,7 @@ def pull(
     no_python: bool = typer.Option(False, "--no-python", help="Skip installing the runner wheel."),
     no_weights: bool = typer.Option(False, "--no-weights", help="Skip downloading weights."),
     kernels_only: bool = typer.Option(
-        False, "--kernels-only", help="Install only the kernel cache (back-compat; implies the skips)."
+        False, "--kernels-only", help="Install only the kernel cache (implies --no-python and --no-weights)."
     ),
     python_exe: Optional[str] = typer.Option(
         None, "--python", help="Target interpreter for the runner pip install (default: this venv)."
@@ -226,15 +235,17 @@ def pull(
 ) -> None:
     """Download a bundle and install everything it carries: kernels, runner, weights.
 
-    A single pull installs the kernel cache, pip-installs the shipped runner wheel, and
-    downloads the model weights, then prints the exact `serve` command. Skip parts with
-    --no-python / --no-weights / --kernels-only.
+    A single pull installs the kernel cache, sets up the runner (pip-installs a packaged
+    wheel, or verifies a reference runner resolves), and downloads the model weights, then
+    prints the exact `serve` command. Skip parts with --no-python / --no-weights /
+    --kernels-only.
     """
     if kernels_only:
         no_python = no_weights = True
 
     repo_id, revision = _split_revision(repo_id)
-    runner_installed = False
+    runner_installed = False  # we pip-installed a packaged wheel
+    runner_ready = False  # runner is usable (installed, or reference that resolves)
     weights_path: Optional[Path] = None
     with tempfile.TemporaryDirectory() as td:
         snapshot = hub.download_bundle(repo_id, revision, dest=td)
@@ -272,7 +283,7 @@ def pull(
         target = cache.install_subtree(staged, out_root, manifest.build_key)
         typer.secho(f"✓ kernels -> {target}", fg=typer.colors.GREEN)
 
-        # ---- runtime payload (schema v2) ----
+        # ---- runtime payload ----
         advisory = runner_version_advisory(manifest, env)
         if advisory is not None and (manifest.runner or manifest.weights):
             typer.secho(
@@ -282,33 +293,51 @@ def pull(
                 fg=typer.colors.YELLOW,
             )
 
-        # Runner wheel: verify integrity, warn if the target venv lacks ttnn, then pip install.
+        # Runner: packaged => verify + pip install the shipped wheel(s); reference => the
+        # runner is not shipped, so just verify it resolves in the target env (install nothing).
         if manifest.runner and not no_python:
-            wp = cache.verify_files(snapshot, wheel_entries)
-            if wp:
-                for p in wp[:20]:
-                    typer.secho(f"  {p}", fg=typer.colors.RED)
-                raise _err(f"Runner wheel integrity check failed ({len(wp)} problem(s)).")
-            if not runtime.ttnn_importable(python_exe):
-                tgt = python_exe or "this interpreter"
-                typer.secho(
-                    f"  ! ttnn is not importable from {tgt}; the runner will install but "
-                    "not run there. Use --python to target the tt-metal venv.",
-                    fg=typer.colors.YELLOW,
-                )
-            wheels = [snapshot / e.path for e in wheel_entries]
-            try:
-                typer.echo(f"Installing runner: {manifest.runner.spec} ({len(wheels)} wheel(s)) ...")
-                runtime.pip_install_wheels(wheels, python=python_exe)
-                runner_installed = True
-                typer.secho("✓ runner installed", fg=typer.colors.GREEN)
-            except Exception as exc:  # noqa: BLE001 — record partial progress, don't roll back kernels
-                _record_pull(repo_id, manifest, out_root, runner_installed=False,
-                             weights_path=None, last_error=f"pip install failed: {exc}")
-                raise _err(
-                    f"Kernels are installed, but the runner pip install failed: {exc}\n"
-                    f"  Re-run `tt-kernel pull {repo_id} --no-weights` to retry just the runner."
-                )
+            if manifest.runner.is_packaged:
+                wp = cache.verify_files(snapshot, wheel_entries)
+                if wp:
+                    for p in wp[:20]:
+                        typer.secho(f"  {p}", fg=typer.colors.RED)
+                    raise _err(f"Runner wheel integrity check failed ({len(wp)} problem(s)).")
+                if not runtime.ttnn_importable(python_exe):
+                    tgt = python_exe or "this interpreter"
+                    typer.secho(
+                        f"  ! ttnn is not importable from {tgt}; the runner will install but "
+                        "not run there. Use --python to target the tt-metal venv.",
+                        fg=typer.colors.YELLOW,
+                    )
+                wheels = [snapshot / e.path for e in wheel_entries]
+                try:
+                    typer.echo(f"Installing runner: {manifest.runner.spec} ({len(wheels)} wheel(s)) ...")
+                    runtime.pip_install_wheels(wheels, python=python_exe)
+                    runner_installed = True
+                    runner_ready = True
+                    typer.secho("✓ runner installed", fg=typer.colors.GREEN)
+                except Exception as exc:  # noqa: BLE001 — record partial progress, don't roll back kernels
+                    _record_pull(repo_id, manifest, out_root, runner_installed=False,
+                                 weights_path=None, last_error=f"pip install failed: {exc}")
+                    raise _err(
+                        f"Kernels are installed, but the runner pip install failed: {exc}\n"
+                        f"  Re-run `tt-kernel pull {repo_id} --no-weights` to retry just the runner."
+                    )
+            else:
+                # Reference runner: nothing ships in the bundle; confirm it's importable.
+                if runtime.runner_spec_importable(manifest.runner.spec, python_exe):
+                    runner_ready = True
+                    typer.secho(
+                        f"✓ runner {manifest.runner.spec} resolved (reference; not shipped)",
+                        fg=typer.colors.GREEN,
+                    )
+                else:
+                    src = f" Install it from {manifest.runner.source}." if manifest.runner.source else ""
+                    typer.secho(
+                        f"  ! runner {manifest.runner.spec} is a reference (not shipped) and is "
+                        f"not importable in the target env.{src}",
+                        fg=typer.colors.YELLOW,
+                    )
 
         # Weights: download into a resolvable models dir (resumable).
         if manifest.weights and not no_weights:
@@ -331,7 +360,7 @@ def pull(
 
     # Ready-to-run guidance.
     typer.secho(f"✓ Installed {repo_id}", fg=typer.colors.GREEN)
-    if manifest.runner and runner_installed and weights_path is not None:
+    if manifest.runner and runner_ready and weights_path is not None:
         typer.echo("\nRun it:")
         typer.secho("  " + runtime.serve_command(manifest.runner.spec, weights_path),
                     fg=typer.colors.CYAN)
@@ -340,8 +369,12 @@ def pull(
                         fg=typer.colors.YELLOW)
     elif manifest.runner:
         missing = []
-        if not runner_installed:
-            missing.append("runner (re-run without --no-python)")
+        if not runner_ready:
+            if manifest.runner.is_packaged:
+                missing.append("runner (re-run without --no-python)")
+            else:
+                src = f" — install from {manifest.runner.source}" if manifest.runner.source else ""
+                missing.append(f"runner {manifest.runner.spec} (reference{src})")
         if weights_path is None and manifest.weights:
             missing.append("weights (re-run without --no-weights)")
         if missing:

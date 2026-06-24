@@ -43,8 +43,10 @@ matching host `pull` and re-run — the kernels load from cache with no recompil
 
 ## Bundling a runnable model (kernels + runner + weights)
 
-A v2 bundle adds a self-contained runner wheel and a weights reference so one `pull`
-installs everything. **Producing the runner is governed by
+A runnable bundle adds a runner and a weights reference so one `pull` installs
+everything. The runner is either **packaged** (a wheel shipped in the bundle, via
+`--python-package`) or a **reference** (a `--runner-spec` the consumer already has or
+installs from `--runner-source`). **Producing the runner is governed by
 [docs/authoring_runners.md](docs/authoring_runners.md)** — read it before pushing one; a
 runner that doesn't follow the contract won't install or serve.
 
@@ -120,14 +122,15 @@ tt-kernel login
 # 3. Publish it — --arch and --tt-metal-version stand in for hardware/build detection
 tt-kernel push <you>/kernel-selftest --private \
   --cache-dir /tmp/ttk-test-cache --arch blackhole \
-  --tt-metal-version v0.99-test --model google/gemma-test
+  --tt-metal-version v0.99-test
 
 # 4. Inspect + compatibility verdict
 tt-kernel info <you>/kernel-selftest --arch blackhole
 
 # 5. Pull into a DIFFERENT empty cache dir (simulates another machine)
 tt-kernel pull <you>/kernel-selftest --cache-dir /tmp/ttk-restore --arch blackhole
-diff -r /tmp/ttk-test-cache/4242 /tmp/ttk-restore/4242 && echo "round-trip OK"
+diff -r /tmp/ttk-test-cache/tt-metal-cache4242 /tmp/ttk-restore/tt-metal-cache4242 \
+  && echo "round-trip OK"
 
 # 6. Local bookkeeping + teardown
 tt-kernel list

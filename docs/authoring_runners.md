@@ -145,7 +145,7 @@ build.** The simplest reliable path is to produce the bundle on the same build y
 
 ---
 
-## 4. Push a v2 bundle
+## 4. Push the bundle
 
 From a machine whose kernel cache is populated for your model (run it once to JIT-compile),
 with your wheel built:
@@ -167,6 +167,13 @@ tt-kernel push <ns>/<model>-blackhole --private \
   `--weights-allow`, `--weights-ignore` to scope it.
 
 `--tt-metal-version` / `--arch` overrides exist for testing as with kernel-only bundles.
+
+**Reference runners.** If the runner already ships in the consumer's environment (e.g. it's
+registered in `tt_inference_server`), omit `--python-package` and pass `--runner-spec` alone —
+the bundle records a *reference* the consumer resolves rather than a shipped wheel. Add
+`--runner-source <pip-name|git-url>` to tell the consumer where to get it. Reference mode trades
+reproducibility for size: only a packaged wheel guarantees the consumer runs your exact runner
+code (and thus reproduces your numbers).
 
 ---
 
