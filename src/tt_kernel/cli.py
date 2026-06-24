@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2024 Tenstorrent USA, Inc.
+
 """``tt-kernel`` command-line interface."""
 
 from __future__ import annotations

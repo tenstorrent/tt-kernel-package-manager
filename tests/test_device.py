@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2024 Tenstorrent USA, Inc.
+
 """Parsing of tt-smi snapshot JSON and arch normalisation."""
 
 from tt_kernel import device

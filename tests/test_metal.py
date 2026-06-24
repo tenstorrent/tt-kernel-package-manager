@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2024 Tenstorrent USA, Inc.
+
 """build_key input assembly and compile-hash fingerprinting."""
 
 from tt_kernel import metal

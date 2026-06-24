@@ -140,3 +140,20 @@ tt-kernel rm <you>/kernel-selftest --cache-dir /tmp/ttk-restore
 Try the guard rails too: `tt-kernel pull ... --arch wormhole_b0` fails fatally
 (wrong ISA), and a `--tt-metal-version` that differs from the bundle's blocks the
 install until you add `--force`.
+
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on:
+- Reporting bugs via GitHub Issues
+- Submitting pull requests
+- Coding standards and testing requirements
+
+Pull requests are reviewed weekly. For questions, feel free to open an issue or discussion.
+
+## License
+
+This project is licensed under the **Apache License 2.0** - see [LICENSE](LICENSE) for the complete license text.
+
+For clarification on how this license applies to commercial use, modifications, and patent grants, see [LICENSE_understanding.txt](LICENSE_understanding.txt).
+
+This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md). By participating, you agree to uphold this code.

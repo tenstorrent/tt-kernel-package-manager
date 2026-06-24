@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2024 Tenstorrent USA, Inc.
+
 """Thin wrapper over huggingface_hub auth. We store no token of our own."""
 
 from __future__ import annotations

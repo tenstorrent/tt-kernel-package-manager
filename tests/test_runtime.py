@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2024 Tenstorrent USA, Inc.
+
 """Unit tests for the runtime payload helpers (runner wheel + weights install).
 
 All hardware/network/pip side effects are monkeypatched — nothing is actually

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2024 Tenstorrent USA, Inc.
+
 """The compatibility manifest — the correctness core of tt-kernel.
 
 A manifest pins everything the cached binaries depend on so that ``pull`` can refuse

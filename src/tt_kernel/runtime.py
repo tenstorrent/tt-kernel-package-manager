@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2024 Tenstorrent USA, Inc.
+
 """Install the *runtime* half of a bundle: the Python runner wheel and the weights.
 
 This module deliberately holds everything that is NOT kernel-cache plumbing (cache.py)
