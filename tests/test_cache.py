@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2024 Tenstorrent USA, Inc.
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 """Cache-root resolution, build_key selection, and packaging round-trip."""
 

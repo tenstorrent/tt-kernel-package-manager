@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: 2024 Tenstorrent USA, Inc.
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 """Hugging Face Hub I/O. All storage, auth, visibility, LFS, and search live here.
 
