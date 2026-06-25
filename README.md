@@ -1,5 +1,10 @@
 # tt-kernel
 
+> ⚠️ **Experimental — no support, no guarantees.** tt-kernel is an early, experimental
+> project. Nothing here is officially supported, and we make no claim of correctness,
+> stability, or fitness for any purpose. APIs, the bundle format, and behavior may change
+> or break at any time without notice. Use it at your own risk.
+
 A wrapper around Hugging Face that lets users upload and distribute versioned kernels
 and configs for Tenstorrent, so you can pull a pre-tuned cache and run models in known-good
 configurations.
