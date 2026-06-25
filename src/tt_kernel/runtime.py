@@ -149,12 +149,32 @@ def runner_spec_importable(spec: str, python: Optional[str] = None) -> bool:
         return False
 
 
+def serve_argv(
+    model: str,
+    *,
+    runner_spec: Optional[str] = None,
+    unsafe: bool = True,
+    python: Optional[str] = None,
+) -> List[str]:
+    """Argv for dispatch's serve entry point — the canonical handoff form.
+
+    ``serve`` always requires ``--unsafe`` (it is the prototype's acknowledgement gate,
+    not the per-model trust gate — dispatch decides community gating itself), so it
+    defaults on. ``runner_spec`` selects a custom runner (Tier 1); omit it for the
+    dynamic path (Tier 2/3), where ``model`` is the weights dir or a bare HF id.
+    """
+    argv = [python or "python", "-m", _DISPATCH_SERVE_MODULE, "serve"]
+    if unsafe:
+        argv.append("--unsafe")
+    if runner_spec:
+        argv += ["--runner", runner_spec]
+    argv.append(str(model))
+    return argv
+
+
 def serve_command(runner_spec: str, weights_path: Path) -> str:
-    """The exact ready-to-run line for dispatch's OpenAI-compatible server."""
-    return (
-        f"python -m {_DISPATCH_SERVE_MODULE} serve --unsafe "
-        f"--runner {runner_spec} {weights_path}"
-    )
+    """The exact ready-to-run line for dispatch's OpenAI-compatible server (Tier 1)."""
+    return " ".join(serve_argv(str(weights_path), runner_spec=runner_spec, unsafe=True))
 
 
 __all__ = [
@@ -164,5 +184,6 @@ __all__ = [
     "ttnn_importable",
     "runner_spec_importable",
     "dispatch_available",
+    "serve_argv",
     "serve_command",
 ]
