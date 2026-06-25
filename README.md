@@ -20,6 +20,12 @@ model fully installed and ready to serve. Even then, **weights are never stored 
 bundle** — only a reference to their HF repo. To write a runner that works with the package
 manager, see **[docs/authoring_runners.md](docs/authoring_runners.md)**.
 
+`tt-kernel` is also the **front door** for running a model: `tt-kernel run <id>` resolves
+whether a curated bundle exists and routes accordingly — the author's tuned runner +
+precompiled kernels when one is published, otherwise it hands off to the dynamic serving
+runtime on the bare Hugging Face repo. Custom implementations win; nothing overrides them.
+See [Running a model](#running-a-model-the-front-door) below.
+
 ## Install
 
 ```bash
@@ -30,7 +36,9 @@ pip install tt-kernel        # from this repo: pip install -e .
 
 ```bash
 tt-kernel login                                   # reuses huggingface_hub's token store
-tt-kernel push you/smallmodel-blackholex1 --public
+tt-kernel doctor                                  # check tt-metal/tt-lang/tt-inference-server + hardware
+tt-kernel run   you/smallmodel-blackholex1        # run the model via the best available path
+tt-kernel push  you/smallmodel-blackholex1 --public
 tt-kernel info  you/smallmodel-blackholex1        # manifest + compatibility verdict
 tt-kernel pull  you/smallmodel-blackholex1        # validate, then install into the cache
 tt-kernel search gemma                            # discover published caches
@@ -69,6 +77,58 @@ tt-kernel pull you/mymodel-blackhole       # kernels + pip-install runner + down
 from the tt-metal build whose `ttnn` the runner calls). A kernel-version mismatch hard-blocks;
 the runner/weights install anyway with a warning. `tt-kernel` does not fix a mismatch — build
 and serve on the same tt-metal build. See the guide for details.
+
+## Running a model: the front door
+
+`tt-kernel run <id>` is the single entry point for serving a model. It resolves the model
+identifier against installed and published bundles and routes it down a **three-tier ladder** —
+a curated bundle always wins, and a bare Hugging Face repo falls through to the dynamic
+serving runtime. A completely custom implementation is therefore never overridden.
+
+| Tier | Trigger | What runs |
+|------|---------|-----------|
+| **1 — custom bundle** | a bundle (installed or published) carries a runner | the author's runner + their precompiled kernels |
+| **2 — kernels-only** | a bundle with no runner (just a warm cache) | the dynamic runtime, with the precompiled cache hitting on disk |
+| **3 — no bundle** | a bare HF id / local path | the dynamic runtime on the model as-is |
+
+```bash
+tt-kernel run you/mymodel-blackhole          # tuned bundle -> author's runner + kernels
+tt-kernel run meta-llama/Llama-3.1-8B        # no bundle    -> dynamic runtime on the bare repo
+tt-kernel run you/mymodel --print            # print the serve command instead of executing
+tt-kernel run you/mymodel --local-only       # resolve only against installed bundles (no Hub call)
+```
+
+When a tuned bundle is **published but not installed**, `run` tells you it exists
+(`tt-kernel pull <id>` to use it) and then does exactly what you asked — running the
+dynamic path on the bare repo rather than silently downloading. The dynamic handoff targets
+the dispatch serving runtime (`tt_inference_server.dispatch.serve`); `tt-kernel` only
+*detects* that package, it never imports it — the runner spec is an opaque string. So a model
+runs whether or not a curated bundle exists; the bundle just records trust and a faster path.
+
+## Checking your toolchain
+
+`tt-kernel` expects the surrounding stack — tt-metal, tt-lang, tt-inference-server — to
+already be present on the system. It does **not** install them; it checks they are adequate
+versions and warns when they are not.
+
+```bash
+tt-kernel doctor
+```
+
+```
+Toolchain:
+  ✓ tt-metal: 0.72.1.dev3 (require >= 0.72.0) — ok
+  ✓ tt-lang: 1.1.3 (require >= 1.1.3) — ok
+  ✓ tt-inference-server: 0.15.0 (require >= 0.15.0) — ok
+
+Hardware:
+  ✓ arch=blackhole devices=1 (via tt-smi)
+```
+
+`doctor` exits non-zero if any component is missing or below the required version. `run` and
+`pull` run the same check and emit a warning (they do not abort) so a version skew is visible
+before it bites. tt-inference-server is detected by import and its `VERSION` file (it is
+normally used from a checkout, not pip-installed).
 
 ## How compatibility is enforced
 
