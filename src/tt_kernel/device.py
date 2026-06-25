@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 """Detect arch, harvesting mask, and device count from the local hardware.
 
 Detection order (most authoritative first):

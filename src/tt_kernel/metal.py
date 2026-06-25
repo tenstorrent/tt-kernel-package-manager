@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 """Resolve the local tt-metal version and build_key inputs without opening a device.
 
 ``build_key`` itself is C++-only (``DeviceBuildEnv::build_key()``) and not exposed to

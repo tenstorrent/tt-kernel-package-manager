@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 """Locate the tt-metal kernel cache, enumerate build_key subtrees, and package/install.
 
 Mirrors the verified tt-metal source. tt-metal builds the per-build directory as the

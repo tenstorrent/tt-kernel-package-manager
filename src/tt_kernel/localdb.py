@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 """A tiny local index of installed bundles, for ``list`` and ``rm``.
 
 Stored at ``~/.cache/tt-kernel/installed.json``. This is a convenience record only —
