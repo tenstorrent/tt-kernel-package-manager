@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 """Validate the surrounding toolchain — and only ever *warn*, never install.
 
 tt-kernel is the front door, but it is not a package installer for the platform: it

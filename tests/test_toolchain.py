@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 """Tests for the toolchain version-check (WS2). No hardware; all detection is faked."""
 
 from typer.testing import CliRunner

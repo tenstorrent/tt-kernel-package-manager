@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 """Detect-only bundle resolution — "does a bundle exist for this id, and what's in it?"
 
 This is the front-door query the orchestrator (``tt-kernel run``) and the dispatch

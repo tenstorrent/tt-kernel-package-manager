@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 """Tests for the detect-only resolver and the ``run`` orchestrator (WS1).
 
 No hardware, no network: localdb is redirected to a tmp dir via XDG_CACHE_HOME, the

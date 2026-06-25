@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
 """Tests for relocate_dephashes — make a pulled cache produce JIT hits at the new path.
 
 tt-metal records absolute dependency paths in .dephash and recompiles if a listed path
