@@ -166,11 +166,54 @@ def verify_files(root: Path, entries: List[FileEntry]) -> List[str]:
     return problems
 
 
+def relocate_dephashes(target: Path, build_key: int) -> int:
+    """Rewrite in-cache absolute paths inside ``.dephash`` files to the install location.
+
+    tt-metal's JIT cache validity check (``dependencies_up_to_date`` in
+    ``jit_build/depend.cpp``) reads each dependency by its stored **absolute** path and
+    recompiles if that path can't be read. A kernel's generated sources
+    (``chlkc_*.h``/``.cpp``, ``defines_generated.h``) live *inside* the build_key subtree,
+    so their stored paths embed the **producer's** cache location. Pulled into a different
+    cache dir, those paths no longer exist and every such kernel recompiles — defeating the
+    point of the bundle.
+
+    This rewrites the producer's build_key-dir prefix (detected from the dephash content,
+    which always ends in ``<build_key>/kernels/``) to ``target`` (the new build_key dir).
+    The tt-metal *tree* deps (absolute, outside the cache) are left untouched — correct on
+    the same host; cross-host relocation would also need the tree prefix rewritten.
+    Returns the number of dephash files changed. Best-effort: never raises.
+    """
+    new_prefix = str(target)
+    pat = re.compile(r'([^\s"]*' + re.escape(str(build_key)) + r')/kernels/')
+    changed = 0
+    for dephash in target.rglob("*.dephash"):
+        try:
+            text = dephash.read_text()
+        except OSError:
+            continue
+        m = pat.search(text)
+        if not m:
+            continue
+        old_prefix = m.group(1)
+        if old_prefix == new_prefix:
+            continue
+        new_text = text.replace(old_prefix, new_prefix)
+        if new_text != text:
+            try:
+                dephash.write_text(new_text)
+                changed += 1
+            except OSError:
+                continue
+    return changed
+
+
 def install_subtree(staged: Path, out_root: str, build_key: int) -> Path:
     """Merge a downloaded build_key subtree into the local cache at ``out_root``.
 
     ``staged`` is the directory holding the bundle's build_key subtree contents.
-    Existing files are overwritten; the target is created if absent.
+    Existing files are overwritten; the target is created if absent. After copying, the
+    ``.dephash`` validity files are relocated so the cache produces JIT hits at this path
+    rather than recompiling (see ``relocate_dephashes``).
     """
     target = build_key_path(out_root, build_key)
     target.mkdir(parents=True, exist_ok=True)
@@ -180,6 +223,7 @@ def install_subtree(staged: Path, out_root: str, build_key: int) -> Path:
             dst = target / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
+    relocate_dephashes(target, build_key)
     return target
 
 
