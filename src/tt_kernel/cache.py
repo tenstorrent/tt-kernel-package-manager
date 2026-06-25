@@ -237,6 +237,69 @@ def relocate_dephashes(target: Path, build_key: int) -> int:
     return changed
 
 
+def detect_cache_tt_metal_root(subtree: Path) -> Optional[str]:
+    """Detect the producer's tt-metal source root embedded in a build_key subtree.
+
+    Every ``.dephash`` lists two kinds of dependency path: generated sources *inside* the
+    subtree (handled by ``relocate_dephashes``) and tt-metal tree headers/compiler files
+    *outside* it. The latter all share the producer's tt-metal root as a common prefix, so
+    we return ``os.path.commonpath`` of the external deps. Recorded in the manifest so a
+    cross-host consumer can rewrite that prefix on install. Returns None if none are found.
+    """
+    subtree_prefix = os.path.normpath(str(subtree)) + os.sep
+    externals: List[str] = []
+    for dephash in subtree.rglob("*.dephash"):
+        try:
+            text = dephash.read_text()
+        except OSError:
+            continue
+        for m in re.finditer(r'"([^"]+)"', text):
+            path = m.group(1)
+            if path.startswith("/") and not os.path.normpath(path).startswith(subtree_prefix):
+                externals.append(path)
+        if len(externals) >= 256:  # a stable common prefix needs only a sample
+            break
+    if not externals:
+        return None
+    try:
+        root = os.path.commonpath(externals)
+    except ValueError:
+        return None
+    # Guard against a degenerate prefix (a stray non-tt-metal dep would shrink it to /).
+    return root if root and root.count(os.sep) >= 2 else None
+
+
+def relocate_tt_metal_tree(target: Path, producer_root: str, consumer_root: str) -> int:
+    """Rewrite the producer's tt-metal source-root prefix to the consumer's in every
+    ``.dephash`` under ``target`` — the cross-host complement to ``relocate_dephashes``.
+
+    No-op when the roots are equal. The dependency *content* hashes in the dephash are
+    left intact: the compat check already requires a matching ``tt_metal_version``, so the
+    headers at the rewritten path hash-match and the kernel hits. Returns the number of
+    files changed. Best-effort: never raises.
+    """
+    producer_root = os.path.normpath(producer_root)
+    consumer_root = os.path.normpath(consumer_root)
+    if producer_root == consumer_root:
+        return 0
+    changed = 0
+    for dephash in target.rglob("*.dephash"):
+        try:
+            text = dephash.read_text()
+        except OSError:
+            continue
+        if producer_root not in text:
+            continue
+        new_text = text.replace(producer_root, consumer_root)
+        if new_text != text:
+            try:
+                dephash.write_text(new_text)
+                changed += 1
+            except OSError:
+                continue
+    return changed
+
+
 def install_subtree(staged: Path, out_root: str, build_key: int) -> Path:
     """Merge a downloaded build_key subtree into the local cache at ``out_root``.
 

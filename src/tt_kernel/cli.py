@@ -196,6 +196,7 @@ def push(
             tt_kernel_version=__version__,
             created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
             hostname=socket.gethostname(),
+            tt_metal_home=cache.detect_cache_tt_metal_root(subtree),
         ),
         runner=runner_block,
         weights=weights_block,
@@ -295,6 +296,22 @@ def pull(
         out_root = cache.resolve_out_root(cache_dir)
         target = cache.install_subtree(staged, out_root, manifest.build_key)
         typer.secho(f"✓ kernels -> {target}", fg=typer.colors.GREEN)
+
+        # Cross-host dep relocation: if this bundle was built against a tt-metal at a
+        # different path than ours, rewrite the tree-dep prefix so the cache hits here too
+        # (in-cache paths were already relocated by install_subtree).
+        producer_home = manifest.producer.tt_metal_home if manifest.producer else None
+        if producer_home:
+            consumer_home = metal.detect_tt_metal_home()
+            if (consumer_home and os.path.isdir(consumer_home)
+                    and os.path.normpath(consumer_home) != os.path.normpath(producer_home)):
+                n = cache.relocate_tt_metal_tree(target, producer_home, consumer_home)
+                if n:
+                    typer.secho(
+                        f"  ↻ relocated tt-metal tree deps in {n} dephash file(s): "
+                        f"{producer_home} -> {consumer_home}",
+                        fg=typer.colors.CYAN,
+                    )
 
         # ---- runtime payload ----
         advisory = runner_version_advisory(manifest, env)

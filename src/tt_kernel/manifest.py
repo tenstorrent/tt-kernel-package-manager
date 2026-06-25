@@ -51,6 +51,12 @@ class Producer(BaseModel):
     tt_kernel_version: str
     created_at: str
     hostname: Optional[str] = None
+    # Absolute path of the producer's tt-metal source root, as embedded in the kernel
+    # cache's .dephash dependency paths. Lets a consumer on a different host (different
+    # checkout path / HOME) rewrite those tree-dep prefixes to its own tt-metal so the
+    # pulled cache hits instead of recompiling. None => producer couldn't detect it
+    # (consumer falls back to in-cache relocation only, correct on the same host).
+    tt_metal_home: Optional[str] = None
 
 
 class RunnerPayload(BaseModel):
