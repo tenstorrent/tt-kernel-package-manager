@@ -48,6 +48,7 @@ tt-kernel info  you/smallmodel-blackholex1        # manifest + compatibility ver
 tt-kernel pull  you/smallmodel-blackholex1        # validate, then install into the cache
 tt-kernel search gemma                            # discover published caches
 tt-kernel list                                    # locally installed bundles
+tt-kernel clean --all                             # wipe cache subtrees for a clean producer state
 tt-kernel rm    you/smallmodel-blackholex1        # remove an installed cache subtree
 ```
 

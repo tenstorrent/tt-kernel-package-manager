@@ -607,6 +607,58 @@ def rm(
         )
 
 
+# --------------------------------------------------------------------------- clean
+@app.command()
+def clean(
+    build_key: Optional[int] = typer.Option(
+        None, "--build-key", help="Remove this build_key subtree from the cache."
+    ),
+    all_keys: bool = typer.Option(
+        False, "--all", help="Remove ALL build_key subtrees under the cache root."
+    ),
+    cache_dir: Optional[str] = typer.Option(None, help="Override the tt-metal cache root."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt for --all."),
+) -> None:
+    """Clear kernel-cache subtrees to force a clean state before a run/produce.
+
+    The tt-metal JIT cache is keyed by build_key (the build environment), and every model
+    run on a build shares one subtree — so to produce a model-specific bundle you must start
+    from a clean cache. Use this to wipe a stale subtree (or all of them) first:
+
+      tt-kernel clean --build-key N            # remove one build_key subtree
+      tt-kernel clean --all                    # remove every build_key subtree
+      tt-kernel clean --all --cache-dir DIR    # ... under a specific cache root
+
+    For removing an *installed bundle* (and its index entry), use `tt-kernel rm` instead.
+    """
+    if all_keys and build_key is not None:
+        raise _err("Pass either --build-key N or --all, not both.")
+    out_root = cache.resolve_out_root(cache_dir)
+    keys = cache.list_build_keys(out_root)
+    if all_keys:
+        if not keys:
+            typer.echo(f"No build_key subtrees under {out_root}; nothing to clean.")
+            return
+        if not yes:
+            typer.confirm(
+                f"Remove ALL {len(keys)} build_key subtree(s) under {out_root}?", abort=True
+            )
+        for k in keys:
+            cache.remove_subtree(out_root, k)
+        typer.secho(
+            f"✓ removed {len(keys)} build_key subtree(s) from {out_root}", fg=typer.colors.GREEN
+        )
+    elif build_key is not None:
+        if cache.remove_subtree(out_root, build_key):
+            typer.secho(f"✓ removed build_key {build_key} from {out_root}", fg=typer.colors.GREEN)
+        else:
+            typer.secho(
+                f"build_key {build_key} not present under {out_root}.", fg=typer.colors.YELLOW
+            )
+    else:
+        raise _err("Specify --build-key N or --all.")
+
+
 # ---------------------------------------------------------------------------- utils
 def _split_revision(repo_id: str) -> "tuple[str, Optional[str]]":
     """Split ``namespace/name@revision`` into (repo_id, revision|None)."""
