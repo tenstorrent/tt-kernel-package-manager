@@ -146,6 +146,36 @@ def count_kernels(subtree: Path) -> int:
     return sum(1 for c in kdir.iterdir() if c.is_dir())
 
 
+def publish_warnings(out_root: str, build_key: int, *, default_cache: bool) -> List[str]:
+    """Pre-push guard (#2, proposal 3): warn when the cache being published does not look
+    isolated to a single model, so a producer does not accidentally ship the shared
+    all-models cache.
+
+    tt-metal's JIT cache is keyed by build_key and **not** tagged by model: every model
+    compiled on one build shares that build_key's ``kernels/`` dir. We cannot tell models
+    apart within a build_key, but we can flag the two detectable risk signals — sibling
+    build_keys under the same root, and publishing straight from the default shared cache.
+    Returns human-readable warnings (empty == looks isolated). Warn-only by design: the
+    automated producer (``release.py``) publishes from a fresh ``--cache-dir`` and so never
+    trips these, while an interactive user pushing from their shared cache gets told.
+    """
+    warnings: List[str] = []
+    others = [k for k in list_build_keys(out_root) if k != build_key]
+    if others:
+        warnings.append(
+            f"cache root also holds build_key(s) {others}; publishing only {build_key}. "
+            "If this is a shared cache, the subtree may mix kernels from multiple models. "
+            "Warm a fresh --cache-dir for a model-specific bundle (see `tt-kernel clean`)."
+        )
+    if default_cache:
+        warnings.append(
+            f"publishing from the default shared cache ({out_root}); every model compiled "
+            "on this build shares this build_key. Use a fresh --cache-dir (or run "
+            "`tt-kernel clean` first) for a model-specific bundle."
+        )
+    return warnings
+
+
 def verify_files(root: Path, entries: List[FileEntry]) -> List[str]:
     """Verify a set of files under ``root`` against their manifest entries.
 

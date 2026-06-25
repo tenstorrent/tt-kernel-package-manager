@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -138,6 +139,12 @@ def push(
 
     subtree = cache.build_key_path(out_root, key)
     typer.echo(f"Packaging build_key {key} from {subtree}")
+    # Isolation feedback + pre-push guard (#2): show what's being shipped and warn if the
+    # cache does not look isolated to one model (sibling build_keys / the shared default).
+    typer.echo(f"  {cache.count_kernels(subtree)} kernel group(s) in this subtree")
+    default_cache = cache_dir is None and not os.environ.get("TT_METAL_CACHE")
+    for warning in cache.publish_warnings(out_root, key, default_cache=default_cache):
+        typer.secho(f"  ! {warning}", fg=typer.colors.YELLOW)
 
     dev = metal.detect_device(arch_override=arch)
     version = tt_metal_version or metal.resolve_version()
