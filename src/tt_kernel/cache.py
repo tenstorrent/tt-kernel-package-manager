@@ -146,6 +146,32 @@ def count_kernels(subtree: Path) -> int:
     return sum(1 for c in kdir.iterdir() if c.is_dir())
 
 
+# Signature kernel groups that only a fast-path warmup (DISPATCH_TRACE +
+# DISPATCH_ONDEVICE_LMHEAD) produces: the paged flash-decode, the traced decode
+# reader/writer, and the on-device-argmax lm_head reader. A baseline (trace-disabled)
+# cache lacks them, so a fast-path consumer would re-JIT ~half its kernels.
+_FAST_PATH_KERNEL_MARKERS = (
+    "sdpa_flash_decode",
+    "reader_decode_all",
+    "writer_decode_all",
+    "reader_argmax_tile_layout",
+)
+
+
+def detect_fast_path_kernels(subtree: Path) -> bool:
+    """Whether a build_key subtree carries the traced-decode / on-device-lm_head kernels a
+    ``DISPATCH_TRACE``/``DISPATCH_ONDEVICE_LMHEAD`` consumer needs (#6 bundle completeness).
+
+    Heuristic by signature kernel-group name under ``kernels/``. Recorded in the manifest
+    so ``pull`` can warn when a baseline-only bundle would re-JIT on the fast path.
+    """
+    kdir = subtree / "kernels"
+    if not kdir.is_dir():
+        return False
+    names = {c.name for c in kdir.iterdir() if c.is_dir()}
+    return any(marker in names for marker in _FAST_PATH_KERNEL_MARKERS)
+
+
 def publish_warnings(out_root: str, build_key: int, *, default_cache: bool) -> List[str]:
     """Pre-push guard (#2, proposal 3): warn when the cache being published does not look
     isolated to a single model, so a producer does not accidentally ship the shared

@@ -191,6 +191,7 @@ def push(
             num_hw_cqs=num_hw_cqs, harvesting_mask=dev.harvesting_mask
         ),
         kernel_count=cache.count_kernels(subtree),
+        fast_path_kernels=cache.detect_fast_path_kernels(subtree),
         files=files,
         producer=Producer(
             tt_kernel_version=__version__,
@@ -296,6 +297,14 @@ def pull(
         out_root = cache.resolve_out_root(cache_dir)
         target = cache.install_subtree(staged, out_root, manifest.build_key)
         typer.secho(f"✓ kernels -> {target}", fg=typer.colors.GREEN)
+        if manifest.fast_path_kernels is False:
+            typer.secho(
+                "  ! baseline-only bundle: it lacks the traced-decode / on-device-lm_head "
+                "kernels, so serving on the fast path (DISPATCH_TRACE / "
+                "DISPATCH_ONDEVICE_LMHEAD) will re-JIT them. Produce a fast-path bundle by "
+                "warming with those flags enabled.",
+                fg=typer.colors.YELLOW,
+            )
 
         # Cross-host dep relocation: if this bundle was built against a tt-metal at a
         # different path than ours, rewrite the tree-dep prefix so the cache hits here too
