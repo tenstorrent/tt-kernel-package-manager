@@ -51,6 +51,12 @@ class Producer(BaseModel):
     tt_kernel_version: str
     created_at: str
     hostname: Optional[str] = None
+    # Absolute path of the producer's tt-metal source root, as embedded in the kernel
+    # cache's .dephash dependency paths. Lets a consumer on a different host (different
+    # checkout path / HOME) rewrite those tree-dep prefixes to its own tt-metal so the
+    # pulled cache hits instead of recompiling. None => producer couldn't detect it
+    # (consumer falls back to in-cache relocation only, correct on the same host).
+    tt_metal_home: Optional[str] = None
 
 
 class RunnerPayload(BaseModel):
@@ -106,6 +112,10 @@ class Manifest(BaseModel):
     build_key: int  # uint64; names the cache subtree on disk
     build_key_inputs: BuildKeyInputs = Field(default_factory=BuildKeyInputs)
     kernel_count: int = 0
+    # Whether the cache carries the traced-decode / on-device-lm_head kernels a fast-path
+    # consumer (DISPATCH_TRACE/DISPATCH_ONDEVICE_LMHEAD) needs (#6). None => not recorded
+    # (older bundle); False => baseline-only (fast-path serving will re-JIT those kernels).
+    fast_path_kernels: Optional[bool] = None
     files: List[FileEntry] = Field(default_factory=list)
     producer: Producer
     # Runtime payload (both optional): a runner to dispatch to (packaged or reference)

@@ -52,6 +52,32 @@ def _tt_metal_home() -> Optional[str]:
     return os.environ.get("TT_METAL_HOME") or os.environ.get("TT_METAL_RUNTIME_ROOT")
 
 
+def detect_tt_metal_home() -> Optional[str]:
+    """Best-effort absolute path of the local tt-metal source root — the prefix embedded
+    in ``.dephash`` dependency paths — resolved WITHOUT importing ttnn or opening a device.
+
+    Order: ``TT_METAL_HOME``/``TT_METAL_RUNTIME_ROOT`` env -> the ancestor of the ttnn
+    package (located via ``find_spec``, which does not execute the module) that contains
+    ``tt_metal/hw/inc``. Returns None if neither resolves; callers then skip the cross-host
+    tree-dep rewrite (in-cache relocation alone is correct on the same host).
+    """
+    import importlib.util
+    from pathlib import Path
+
+    home = _tt_metal_home()
+    if home:
+        return os.path.normpath(str(Path(home).expanduser()))
+    try:
+        spec = importlib.util.find_spec("ttnn")
+    except (ImportError, ValueError):
+        spec = None
+    if spec and spec.origin:
+        for parent in Path(spec.origin).resolve().parents:
+            if (parent / "tt_metal" / "hw" / "inc").is_dir():
+                return str(parent)
+    return None
+
+
 def resolve_version() -> Optional[str]:
     """Resolve a tt-metal version string.
 

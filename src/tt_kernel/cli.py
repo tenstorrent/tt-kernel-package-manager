@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import shutil
 import socket
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import List, Optional
@@ -16,7 +19,7 @@ from typing import List, Optional
 import typer
 
 from . import MANIFEST_NAME, TT_KERNEL_TAG, __version__
-from . import auth, cache, hub, localdb, metal, runtime
+from . import auth, cache, hub, localdb, metal, resolve as resolve_mod, runtime, toolchain
 from .manifest import (
     CompatibilityReport,
     FileEntry,
@@ -136,6 +139,12 @@ def push(
 
     subtree = cache.build_key_path(out_root, key)
     typer.echo(f"Packaging build_key {key} from {subtree}")
+    # Isolation feedback + pre-push guard (#2): show what's being shipped and warn if the
+    # cache does not look isolated to one model (sibling build_keys / the shared default).
+    typer.echo(f"  {cache.count_kernels(subtree)} kernel group(s) in this subtree")
+    default_cache = cache_dir is None and not os.environ.get("TT_METAL_CACHE")
+    for warning in cache.publish_warnings(out_root, key, default_cache=default_cache):
+        typer.secho(f"  ! {warning}", fg=typer.colors.YELLOW)
 
     dev = metal.detect_device(arch_override=arch)
     version = tt_metal_version or metal.resolve_version()
@@ -182,11 +191,13 @@ def push(
             num_hw_cqs=num_hw_cqs, harvesting_mask=dev.harvesting_mask
         ),
         kernel_count=cache.count_kernels(subtree),
+        fast_path_kernels=cache.detect_fast_path_kernels(subtree),
         files=files,
         producer=Producer(
             tt_kernel_version=__version__,
             created_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
             hostname=socket.gethostname(),
+            tt_metal_home=cache.detect_cache_tt_metal_root(subtree),
         ),
         runner=runner_block,
         weights=weights_block,
@@ -260,6 +271,7 @@ def pull(
         env = metal.local_env(arch_override=arch, probe=probe)
         report = compare(manifest, env)
         _print_report(report)
+        _warn_toolchain()  # complements the kernel compat check with tt-lang / dispatch versions
 
         if report.has_fatal:
             raise _err("Refusing to install: fatal incompatibility (see above).")
@@ -285,6 +297,30 @@ def pull(
         out_root = cache.resolve_out_root(cache_dir)
         target = cache.install_subtree(staged, out_root, manifest.build_key)
         typer.secho(f"✓ kernels -> {target}", fg=typer.colors.GREEN)
+        if manifest.fast_path_kernels is False:
+            typer.secho(
+                "  ! baseline-only bundle: it lacks the traced-decode / on-device-lm_head "
+                "kernels, so serving on the fast path (DISPATCH_TRACE / "
+                "DISPATCH_ONDEVICE_LMHEAD) will re-JIT them. Produce a fast-path bundle by "
+                "warming with those flags enabled.",
+                fg=typer.colors.YELLOW,
+            )
+
+        # Cross-host dep relocation: if this bundle was built against a tt-metal at a
+        # different path than ours, rewrite the tree-dep prefix so the cache hits here too
+        # (in-cache paths were already relocated by install_subtree).
+        producer_home = manifest.producer.tt_metal_home if manifest.producer else None
+        if producer_home:
+            consumer_home = metal.detect_tt_metal_home()
+            if (consumer_home and os.path.isdir(consumer_home)
+                    and os.path.normpath(consumer_home) != os.path.normpath(producer_home)):
+                n = cache.relocate_tt_metal_tree(target, producer_home, consumer_home)
+                if n:
+                    typer.secho(
+                        f"  ↻ relocated tt-metal tree deps in {n} dephash file(s): "
+                        f"{producer_home} -> {consumer_home}",
+                        fg=typer.colors.CYAN,
+                    )
 
         # ---- runtime payload ----
         advisory = runner_version_advisory(manifest, env)
@@ -406,6 +442,129 @@ def _record_pull(repo_id, manifest, out_root, *, runner_installed, weights_path,
     localdb.record(repo_id, entry)
 
 
+# ------------------------------------------------------------------------- doctor
+def _warn_toolchain() -> None:
+    """Warn (never abort) about an inadequate surrounding toolchain. Called by run/pull
+    so a version skew is surfaced without blocking the user's action."""
+    for c in toolchain.check_toolchain().problems:
+        typer.secho(f"  ! {c.name}: {c.message}", fg=typer.colors.YELLOW)
+
+
+@app.command()
+def doctor() -> None:
+    """Report whether the surrounding toolchain (tt-metal, tt-lang, tt-inference-server)
+    and hardware are adequate. tt-kernel never installs these — it only checks and warns.
+
+    Exits non-zero if any component is missing or below the required version.
+    """
+    report = toolchain.check_toolchain()
+    typer.secho("Toolchain:", bold=True)
+    for c in report.components:
+        ok = c.adequate
+        mark = "✓" if ok else "✗"
+        color = typer.colors.GREEN if ok else typer.colors.RED
+        ver = c.version or "—"
+        typer.secho(f"  {mark} {c.name}: {ver} (require >= {c.required}) — {c.message}", fg=color)
+
+    dev = metal.detect_device()
+    typer.secho("\nHardware:", bold=True)
+    if dev.arch:
+        typer.secho(f"  ✓ arch={dev.arch} devices={dev.device_count} (via {dev.source})",
+                    fg=typer.colors.GREEN)
+    else:
+        typer.secho("  ! no Tenstorrent device detected (tt-smi/ARCH_NAME unavailable)",
+                    fg=typer.colors.YELLOW)
+
+    if not report.ok:
+        raise typer.Exit(code=1)
+    typer.secho("\n✓ toolchain adequate", fg=typer.colors.GREEN)
+
+
+# ----------------------------------------------------------------------------- run
+def _handoff(argv: List[str], *, print_only: bool, why: str) -> None:
+    """Print or execute a dispatch ``serve`` handoff. Execution replaces this process's
+    foreground with the server (blocks until it exits)."""
+    if not runtime.dispatch_available():
+        typer.secho(
+            "  ! the dispatch serving package (tt_inference_server.dispatch) is not "
+            "importable here; install tt-inference-server in this environment.",
+            fg=typer.colors.YELLOW,
+        )
+    typer.secho(f"[{why}]", fg=typer.colors.CYAN)
+    if print_only:
+        typer.echo(" ".join(argv))
+        return
+    if not runtime.dispatch_available():
+        raise _err("Cannot run: dispatch is not available (see above). Use --print to emit the command.")
+    try:
+        raise typer.Exit(code=subprocess.run(argv).returncode)
+    except KeyboardInterrupt:  # graceful Ctrl-C of the served process
+        raise typer.Exit(code=130)
+
+
+@app.command()
+def run(
+    repo_id: str = typer.Argument(
+        ..., help="Model to run: a tt-kernel bundle id (namespace/name[@rev]) or a bare HF model id."
+    ),
+    print_only: bool = typer.Option(
+        False, "--print", help="Print the serve command instead of executing it."
+    ),
+    local_only: bool = typer.Option(
+        False, "--local-only", help="Do not query the Hub; resolve only against installed bundles."
+    ),
+) -> None:
+    """Run a model through the right path: a curated bundle's runner if one exists,
+    otherwise dispatch's dynamic path on the bare HF repo.
+
+    Resolution ladder:
+      Tier 1  bundle installed with a runner  -> the author's runner + their kernels.
+      Tier 1' bundle published (not installed) -> notify it's available, then run dynamic.
+      Tier 2  bundle installed, kernels-only   -> dynamic path; the precompiled cache hits.
+      Tier 3  no bundle                         -> dynamic path on the bare HF id.
+    """
+    _warn_toolchain()
+    repo_id, revision = _split_revision(repo_id)
+    res = resolve_mod.resolve(repo_id, revision=revision, local_only=local_only)
+
+    # Tier 1: a bundle that carries a runner.
+    if res.has_runner:
+        if res.installed:
+            target = res.weights_path or res.weights_repo or repo_id
+            argv = runtime.serve_argv(target, runner_spec=res.runner_spec, unsafe=True,
+                                      python=sys.executable)
+            _handoff(argv, print_only=print_only,
+                     why=f"custom runner {res.runner_spec} (build_key {res.build_key})")
+            return
+        # Published but not installed: notify it's available, then do what the user asked.
+        typer.secho(
+            f"A tuned tt-kernel bundle exists for {repo_id} "
+            f"(runner {res.runner_spec}, build_key {res.build_key}).",
+            fg=typer.colors.YELLOW,
+        )
+        typer.secho(f"  For the author's tuned path:  tt-kernel pull {repo_id}",
+                    fg=typer.colors.YELLOW)
+        target = res.weights_repo or repo_id
+        argv = runtime.serve_argv(target, unsafe=True, python=sys.executable)
+        _handoff(argv, print_only=print_only,
+                 why="dynamic dispatch (tuned bundle available but not installed)")
+        return
+
+    # Tier 2/3: no runner. Dynamic path; an installed kernels-only cache hits on disk.
+    target = res.serve_target or repo_id
+    if res.exists:
+        typer.secho(
+            f"Precompiled kernels present for {repo_id} (build_key {res.build_key}); "
+            "dispatch dynamic path will hit the cache.",
+            fg=typer.colors.GREEN,
+        )
+        why = "dynamic dispatch (precompiled kernel cache)"
+    else:
+        why = "dynamic dispatch (no bundle; bare HF repo)"
+    argv = runtime.serve_argv(target, unsafe=True, python=sys.executable)
+    _handoff(argv, print_only=print_only, why=why)
+
+
 # ---------------------------------------------------------------------------- info
 @app.command()
 def info(
@@ -479,6 +638,58 @@ def rm(
         typer.secho(
             f"Index entry removed; cache subtree was already gone.", fg=typer.colors.YELLOW
         )
+
+
+# --------------------------------------------------------------------------- clean
+@app.command()
+def clean(
+    build_key: Optional[int] = typer.Option(
+        None, "--build-key", help="Remove this build_key subtree from the cache."
+    ),
+    all_keys: bool = typer.Option(
+        False, "--all", help="Remove ALL build_key subtrees under the cache root."
+    ),
+    cache_dir: Optional[str] = typer.Option(None, help="Override the tt-metal cache root."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt for --all."),
+) -> None:
+    """Clear kernel-cache subtrees to force a clean state before a run/produce.
+
+    The tt-metal JIT cache is keyed by build_key (the build environment), and every model
+    run on a build shares one subtree — so to produce a model-specific bundle you must start
+    from a clean cache. Use this to wipe a stale subtree (or all of them) first:
+
+      tt-kernel clean --build-key N            # remove one build_key subtree
+      tt-kernel clean --all                    # remove every build_key subtree
+      tt-kernel clean --all --cache-dir DIR    # ... under a specific cache root
+
+    For removing an *installed bundle* (and its index entry), use `tt-kernel rm` instead.
+    """
+    if all_keys and build_key is not None:
+        raise _err("Pass either --build-key N or --all, not both.")
+    out_root = cache.resolve_out_root(cache_dir)
+    keys = cache.list_build_keys(out_root)
+    if all_keys:
+        if not keys:
+            typer.echo(f"No build_key subtrees under {out_root}; nothing to clean.")
+            return
+        if not yes:
+            typer.confirm(
+                f"Remove ALL {len(keys)} build_key subtree(s) under {out_root}?", abort=True
+            )
+        for k in keys:
+            cache.remove_subtree(out_root, k)
+        typer.secho(
+            f"✓ removed {len(keys)} build_key subtree(s) from {out_root}", fg=typer.colors.GREEN
+        )
+    elif build_key is not None:
+        if cache.remove_subtree(out_root, build_key):
+            typer.secho(f"✓ removed build_key {build_key} from {out_root}", fg=typer.colors.GREEN)
+        else:
+            typer.secho(
+                f"build_key {build_key} not present under {out_root}.", fg=typer.colors.YELLOW
+            )
+    else:
+        raise _err("Specify --build-key N or --all.")
 
 
 # ---------------------------------------------------------------------------- utils
