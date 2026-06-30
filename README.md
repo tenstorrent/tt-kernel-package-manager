@@ -41,7 +41,7 @@ pip install tt-kernel        # from this repo: pip install -e .
 
 ```bash
 tt-kernel login                                   # reuses huggingface_hub's token store
-tt-kernel doctor                                  # check tt-metal/tt-lang/tt-inference-server + hardware
+tt-kernel doctor                                  # check tt-metal/tt-lang/tt-dispatch + hardware
 tt-kernel run   you/smallmodel-blackholex1        # run the model via the best available path
 tt-kernel push  you/smallmodel-blackholex1 --public
 tt-kernel info  you/smallmodel-blackholex1        # manifest + compatibility verdict
@@ -107,13 +107,13 @@ tt-kernel run you/mymodel --local-only       # resolve only against installed bu
 When a tuned bundle is **published but not installed**, `run` tells you it exists
 (`tt-kernel pull <id>` to use it) and then does exactly what you asked — running the
 dynamic path on the bare repo rather than silently downloading. The dynamic handoff targets
-the dispatch serving runtime (`tt_inference_server.dispatch.serve`); `tt-kernel` only
+the dispatch serving runtime (`tt_dispatch.serve`); `tt-kernel` only
 *detects* that package, it never imports it — the runner spec is an opaque string. So a model
 runs whether or not a curated bundle exists; the bundle just records trust and a faster path.
 
 ## Checking your toolchain
 
-`tt-kernel` expects the surrounding stack — tt-metal, tt-lang, tt-inference-server — to
+`tt-kernel` expects the surrounding stack — tt-metal, tt-lang, tt-dispatch — to
 already be present on the system. It does **not** install them; it checks they are adequate
 versions and warns when they are not.
 
@@ -125,7 +125,7 @@ tt-kernel doctor
 Toolchain:
   ✓ tt-metal: 0.72.1.dev3 (require >= 0.72.0) — ok
   ✓ tt-lang: 1.1.3 (require >= 1.1.3) — ok
-  ✓ tt-inference-server: 0.15.0 (require >= 0.15.0) — ok
+  ✓ tt-dispatch: 0.15.0 (require >= 0.15.0) — ok
 
 Hardware:
   ✓ arch=blackhole devices=1 (via tt-smi)
@@ -133,7 +133,7 @@ Hardware:
 
 `doctor` exits non-zero if any component is missing or below the required version. `run` and
 `pull` run the same check and emit a warning (they do not abort) so a version skew is visible
-before it bites. tt-inference-server is detected by import and its `VERSION` file (it is
+before it bites. tt-dispatch is detected by import and its `VERSION` file (it is
 normally used from a checkout, not pip-installed).
 
 ## How compatibility is enforced

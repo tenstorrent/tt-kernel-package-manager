@@ -67,7 +67,7 @@ class RunnerPayload(BaseModel):
       existing integrity check covers them. ``pull`` pip-installs them. Fully
       reproducible — the answer for a custom/hand-tuned runner.
     - **reference**: ``wheels`` is empty — the runner is *not* shipped; the consumer is
-      expected to already have it (e.g. registered in ``tt_inference_server``) or to
+      expected to already have it (e.g. registered in ``tt_dispatch``) or to
       install it from ``source``. ``pull`` verifies it resolves but installs nothing.
 
     ``spec`` is the opaque ``"module:Class"`` string the dispatch serving layer selects
@@ -77,7 +77,7 @@ class RunnerPayload(BaseModel):
 
     spec: str  # "module:Class" for dispatch --runner
     wheels: List[str] = Field(default_factory=list)  # filenames under python/; empty => reference
-    entry_point: Optional[str] = None  # name registered under tt_inference_server.runners
+    entry_point: Optional[str] = None  # name registered under tt_dispatch.runners
     source: Optional[str] = None  # where to get a reference (not-shipped) runner: pip name / git URL
     requires_python: Optional[str] = None  # informational
 

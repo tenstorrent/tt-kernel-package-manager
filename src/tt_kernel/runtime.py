@@ -24,8 +24,8 @@ from .manifest import WeightsRef
 ENV_MODELS_DIR = "TT_KERNEL_MODELS_DIR"
 # The dotted path of dispatch's serve entry point — used only to BUILD the printed
 # command string and to DETECT availability. Never imported.
-_DISPATCH_SERVE_MODULE = "tt_inference_server.dispatch.serve"
-_DISPATCH_PKG = "tt_inference_server.dispatch"
+_DISPATCH_SERVE_MODULE = "tt_dispatch.serve"
+_DISPATCH_PKG = "tt_dispatch"
 
 
 def resolve_models_dir(models_dir: Optional[str], repo_id: str) -> Path:

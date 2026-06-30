@@ -9,7 +9,7 @@ the runner so the package manager can install it and the dispatch serving layer 
 and drive it. Get these rules right and your model is `pull`-and-serve for everyone else.
 
 > The runtime contract below mirrors the dispatch serving layer's `BaseRunner`
-> (`tt-inference-server`: `tt_inference_server/dispatch/docs/custom_runners.md`). `tt-kernel`
+> (`tt-dispatch`: `tt_dispatch/docs/custom_runners.md`). `tt-kernel`
 > itself never imports your runner — it only ships the wheel and records the selector string.
 > The contract is the only shared surface.
 
@@ -104,12 +104,12 @@ python -m build --wheel        # or: pip wheel . --no-deps -w dist/
 
 ### Optional: register an entry point for auto-discovery
 
-If you declare the `tt_inference_server.runners` entry point, dispatch can auto-select your
+If you declare the `tt_dispatch.runners` entry point, dispatch can auto-select your
 runner from the model's HF config — `serve <model>` with no `--runner` flag just works:
 
 ```toml
 # pyproject.toml of your runner package
-[project.entry-points."tt_inference_server.runners"]
+[project.entry-points."tt_dispatch.runners"]
 my_model = "ttrunner_mymodel.runner:MyRunner"
 ```
 
@@ -169,7 +169,7 @@ tt-kernel push <ns>/<model>-blackhole --private \
 `--tt-metal-version` / `--arch` overrides exist for testing as with kernel-only bundles.
 
 **Reference runners.** If the runner already ships in the consumer's environment (e.g. it's
-registered in `tt_inference_server`), omit `--python-package` and pass `--runner-spec` alone —
+registered in `tt_dispatch`), omit `--python-package` and pass `--runner-spec` alone —
 the bundle records a *reference* the consumer resolves rather than a shipped wheel. Add
 `--runner-source <pip-name|git-url>` to tell the consumer where to get it. Reference mode trades
 reproducibility for size: only a packaged wheel guarantees the consumer runs your exact runner
@@ -187,7 +187,7 @@ installs the kernel cache, `pip install --no-deps` your wheel, downloads the wei
 the binding, and prints the exact command to serve:
 
 ```
-python -m tt_inference_server.dispatch.serve serve --unsafe \
+python -m tt_dispatch.serve serve --unsafe \
     --runner ttrunner_mymodel.runner:MyRunner <weights-path>
 ```
 
@@ -204,7 +204,7 @@ re-pull is idempotent.
 - [ ] Constructor takes `(model_path, device, **kwargs)`.
 - [ ] If a mesh/own device: `MANAGES_OWN_DEVICE = True` **and** a clean `atexit` close.
 - [ ] Wheel is renamespaced (no `from models...`), self-contained, `ttnn` NOT a dependency.
-- [ ] (Optional) `tt_inference_server.runners` entry point + a `claims()`/`supported_*` hook.
+- [ ] (Optional) `tt_dispatch.runners` entry point + a `claims()`/`supported_*` hook.
 - [ ] Bundle built and served on the **same tt-metal build** (co-versioned with the kernels).
 - [ ] `tt-kernel push` run with `--python-package` + `--runner-spec` (+ `--weights`).
 

@@ -96,7 +96,7 @@ def push(
         None, "--runner-source", help="For a reference runner: where to get it (pip name / git URL)."
     ),
     entry_point: Optional[str] = typer.Option(
-        None, "--entry-point", help="Entry-point name the wheel registers under tt_inference_server.runners."
+        None, "--entry-point", help="Entry-point name the wheel registers under tt_dispatch.runners."
     ),
     weights: Optional[str] = typer.Option(
         None, "--weights", help="HF model repo id whose weights this bundle targets."
@@ -404,7 +404,7 @@ def pull(
         typer.secho("  " + runtime.serve_command(manifest.runner.spec, weights_path),
                     fg=typer.colors.CYAN)
         if not runtime.dispatch_available():
-            typer.secho("  (install the dispatch serving package: pip install tt-inference-server)",
+            typer.secho("  (install the dispatch serving package: pip install tt-dispatch)",
                         fg=typer.colors.YELLOW)
     elif manifest.runner:
         missing = []
@@ -452,7 +452,7 @@ def _warn_toolchain() -> None:
 
 @app.command()
 def doctor() -> None:
-    """Report whether the surrounding toolchain (tt-metal, tt-lang, tt-inference-server)
+    """Report whether the surrounding toolchain (tt-metal, tt-lang, tt-dispatch)
     and hardware are adequate. tt-kernel never installs these — it only checks and warns.
 
     Exits non-zero if any component is missing or below the required version.
@@ -486,8 +486,8 @@ def _handoff(argv: List[str], *, print_only: bool, why: str) -> None:
     foreground with the server (blocks until it exits)."""
     if not runtime.dispatch_available():
         typer.secho(
-            "  ! the dispatch serving package (tt_inference_server.dispatch) is not "
-            "importable here; install tt-inference-server in this environment.",
+            "  ! the dispatch serving package (tt_dispatch) is not "
+            "importable here; install tt-dispatch in this environment.",
             fg=typer.colors.YELLOW,
         )
     typer.secho(f"[{why}]", fg=typer.colors.CYAN)
