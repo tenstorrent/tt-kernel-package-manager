@@ -58,6 +58,25 @@ def test_arch_mismatch_is_fatal():
     assert report.issues[0].field == "arch"
 
 
+# --------------------------------------------------------- kernels-less (vLLM) bundles
+def test_kernels_less_skips_cache_gates():
+    # build_key=None + a tt_metal_version mismatch that WOULD block a kernel bundle.
+    m = _manifest(build_key=None, tt_metal_version="v9.9.9")
+    report = compare(m, _env(tt_metal_version="v1.0.0-abc"))
+    # No cache => tt_metal_version is not a gate here; only arch/device_count are.
+    assert report.compatible and not report.issues
+
+
+def test_kernels_less_arch_still_fatal():
+    report = compare(_manifest(build_key=None), _env(arch="wormhole_b0"))
+    assert report.has_fatal
+
+
+def test_kernels_less_device_count_warns():
+    report = compare(_manifest(build_key=None, device_count=2), _env(device_count=1))
+    assert report.forceable and not report.has_fatal
+
+
 def test_version_mismatch_is_forceable():
     report = compare(_manifest(tt_metal_version="v1"), _env(tt_metal_version="v2"))
     assert not report.compatible

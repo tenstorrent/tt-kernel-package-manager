@@ -109,7 +109,7 @@ def test_download_weights_forwards_args(monkeypatch, tmp_path):
 def test_serve_command_exact():
     cmd = runtime.serve_command("pkg.mod:Runner", Path("/models/org/m"))
     assert cmd == (
-        "python -m tt_inference_server.dispatch.serve serve --unsafe "
+        "python -m tt_api.serve serve --unsafe "
         "--runner pkg.mod:Runner /models/org/m"
     )
 

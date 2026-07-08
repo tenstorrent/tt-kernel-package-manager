@@ -46,6 +46,15 @@ class BundleResolution:
     arch: Optional[str] = None
     tt_metal_version: Optional[str] = None
     build_key: Optional[int] = None
+    # Serving backend of the bundle's runner: "dispatch" (default/legacy) or "vllm".
+    backend: Optional[str] = None
+    # For an installed vLLM bundle: the local folder laid into bundles_dir (== a model
+    # folder under EXTRA_MODELS_DIR). None until pulled.
+    bundle_path: Optional[str] = None
+
+    @property
+    def is_vllm(self) -> bool:
+        return self.backend == "vllm"
 
     @property
     def tier(self) -> int:
@@ -66,12 +75,17 @@ class BundleResolution:
 
 def _from_local(repo_id: str, entry: dict) -> BundleResolution:
     spec = entry.get("runner_spec")
+    backend = entry.get("backend") or "dispatch"
+    bundle_path = entry.get("bundle_path")
+    # A vLLM bundle "has a runner" by virtue of its installed bundle folder, even though
+    # its dispatch ``runner_spec`` is empty.
+    has_runner = bool(spec) or (backend == "vllm" and bundle_path is not None)
     return BundleResolution(
         repo_id=repo_id,
         exists=True,
         installed=True,
         source="local",
-        has_runner=bool(spec),
+        has_runner=has_runner,
         is_packaged=entry.get("python_installed"),
         runner_spec=spec,
         entry_point=entry.get("entry_point"),
@@ -80,12 +94,15 @@ def _from_local(repo_id: str, entry: dict) -> BundleResolution:
         arch=entry.get("arch"),
         tt_metal_version=entry.get("tt_metal_version"),
         build_key=entry.get("build_key"),
+        backend=backend,
+        bundle_path=bundle_path,
     )
 
 
 def _from_manifest(repo_id: str, manifest) -> BundleResolution:
     runner = manifest.runner
     weights = manifest.weights
+    backend = runner.backend if runner else None
     return BundleResolution(
         repo_id=repo_id,
         exists=True,
@@ -100,6 +117,8 @@ def _from_manifest(repo_id: str, manifest) -> BundleResolution:
         arch=manifest.arch,
         tt_metal_version=manifest.tt_metal_version,
         build_key=manifest.build_key,
+        backend=backend,
+        bundle_path=None,
     )
 
 

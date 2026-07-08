@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from . import MANIFEST_NAME, TT_KERNEL_TAG
+from . import MANIFEST_NAME, TT_KERNEL_CATALOG_TAG, TT_KERNEL_TAG
 from .manifest import Manifest
 
 _REPO_TYPE = "model"
@@ -66,6 +66,35 @@ def tag_repo(repo_id: str, tags: List[str]) -> None:
     card.push_to_hub(repo_id, repo_type=_REPO_TYPE)
 
 
+def set_catalog_listing(repo_id: str, listed: bool) -> None:
+    """Add or remove the community-catalog tag on a repo's model card.
+
+    Listing is a deliberate opt-in, separate from ``push``: the web catalog shows only
+    repos carrying ``TT_KERNEL_CATALOG_TAG``. Removing it delists the repo from the
+    catalog on the next crawl (the repo and its content are untouched — tt-kernel only
+    ever flips a pointer tag; the repo stays under its owner's governance).
+    """
+    from huggingface_hub import ModelCard, ModelCardData
+
+    try:
+        card = ModelCard.load(repo_id)
+    except Exception:
+        card = ModelCard("")
+    tags = set(getattr(card.data, "tags", None) or [])
+    if listed:
+        tags.add(TT_KERNEL_CATALOG_TAG)
+    else:
+        tags.discard(TT_KERNEL_CATALOG_TAG)
+    card.data = ModelCardData(tags=sorted(tags))
+    card.push_to_hub(repo_id, repo_type=_REPO_TYPE)
+
+
+def is_private(repo_id: str) -> bool:
+    """Report whether a repo is private (a listed catalog entry must be public)."""
+    info = _api().model_info(repo_id)
+    return bool(getattr(info, "private", False))
+
+
 def download_bundle(repo_id: str, revision: Optional[str], dest: Optional[str] = None) -> Path:
     """Snapshot-download a bundle and return the local snapshot path."""
     from huggingface_hub import snapshot_download
@@ -86,10 +115,15 @@ def fetch_manifest(repo_id: str, revision: Optional[str]) -> Manifest:
     return Manifest.from_json(Path(path).read_text())
 
 
-def search(query: str, limit: int = 50) -> List[dict]:
-    """List tt-kernel cache repos matching a query, newest first."""
+def search(query: str, limit: int = 50, catalog_only: bool = False) -> List[dict]:
+    """List tt-kernel cache repos matching a query, newest first.
+
+    ``catalog_only`` restricts to repos opted into the community catalog (the same set the
+    web frontend shows) rather than every pushed cache bundle.
+    """
     api = _api()
-    results = api.list_models(filter=TT_KERNEL_TAG, search=query or None, limit=limit)
+    tag = TT_KERNEL_CATALOG_TAG if catalog_only else TT_KERNEL_TAG
+    results = api.list_models(filter=tag, search=query or None, limit=limit)
     out: List[dict] = []
     for m in results:
         out.append(

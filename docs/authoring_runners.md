@@ -9,7 +9,7 @@ the runner so the package manager can install it and the dispatch serving layer 
 and drive it. Get these rules right and your model is `pull`-and-serve for everyone else.
 
 > The runtime contract below mirrors the dispatch serving layer's `BaseRunner`
-> (`tt-dispatch`: `tt_dispatch/docs/custom_runners.md`). `tt-kernel`
+> (`tt-models`: `tt_models/docs/custom_runners.md`). `tt-kernel`
 > itself never imports your runner — it only ships the wheel and records the selector string.
 > The contract is the only shared surface.
 
@@ -104,12 +104,12 @@ python -m build --wheel        # or: pip wheel . --no-deps -w dist/
 
 ### Optional: register an entry point for auto-discovery
 
-If you declare the `tt_dispatch.runners` entry point, dispatch can auto-select your
+If you declare the `tt_models.runners` entry point, dispatch can auto-select your
 runner from the model's HF config — `serve <model>` with no `--runner` flag just works:
 
 ```toml
 # pyproject.toml of your runner package
-[project.entry-points."tt_dispatch.runners"]
+[project.entry-points."tt_models.runners"]
 my_model = "ttrunner_mymodel.runner:MyRunner"
 ```
 
@@ -169,7 +169,7 @@ tt-kernel push <ns>/<model>-blackhole --private \
 `--tt-metal-version` / `--arch` overrides exist for testing as with kernel-only bundles.
 
 **Reference runners.** If the runner already ships in the consumer's environment (e.g. it's
-registered in `tt_dispatch`), omit `--python-package` and pass `--runner-spec` alone —
+registered in `tt_models`), omit `--python-package` and pass `--runner-spec` alone —
 the bundle records a *reference* the consumer resolves rather than a shipped wheel. Add
 `--runner-source <pip-name|git-url>` to tell the consumer where to get it. Reference mode trades
 reproducibility for size: only a packaged wheel guarantees the consumer runs your exact runner
@@ -187,7 +187,7 @@ installs the kernel cache, `pip install --no-deps` your wheel, downloads the wei
 the binding, and prints the exact command to serve:
 
 ```
-python -m tt_dispatch.serve serve --unsafe \
+python -m tt_api.serve serve --unsafe \
     --runner ttrunner_mymodel.runner:MyRunner <weights-path>
 ```
 
@@ -204,7 +204,7 @@ re-pull is idempotent.
 - [ ] Constructor takes `(model_path, device, **kwargs)`.
 - [ ] If a mesh/own device: `MANAGES_OWN_DEVICE = True` **and** a clean `atexit` close.
 - [ ] Wheel is renamespaced (no `from models...`), self-contained, `ttnn` NOT a dependency.
-- [ ] (Optional) `tt_dispatch.runners` entry point + a `claims()`/`supported_*` hook.
+- [ ] (Optional) `tt_models.runners` entry point + a `claims()`/`supported_*` hook.
 - [ ] Bundle built and served on the **same tt-metal build** (co-versioned with the kernels).
 - [ ] `tt-kernel push` run with `--python-package` + `--runner-spec` (+ `--weights`).
 
@@ -218,3 +218,61 @@ re-pull is idempotent.
 - **Producing the bundle on a different tt-metal build than you serve on** — runner won't
   import; the warning is honest, not a fix.
 - **Not closing a mesh device** — wedges the card for the next model in a hot-swap.
+
+---
+
+## Authoring a **vLLM** bundle (`--backend vllm`)
+
+The runner contract above is for the *dispatch* serving layer. To instead serve through the
+Tenstorrent **vLLM** plugin (`tenstorrent/vllm`, the primary path), the model's runner is a
+`VllmGeneratorAdapter` — a low-level paged-attention adapter (`initialize_vllm_model`,
+`prefill_forward`, `decode_forward`, `allocate_kv_cache`, `warmup_model_*`, …), *not* a
+`generate()`/`generate_stream()` runner. See the contract at
+`tt-metal/models/common/readiness_check/contract_vllm.py` and the canonical example
+`tt-metal/models/tt_transformers/tt/generator_vllm.py`.
+
+A vLLM bundle is **kernels-less**: it ships no precompiled cache (vLLM JITs at first-run
+warmup into tt-metal's own local cache). It is a self-contained *folder*:
+
+```
+my_bundle/
+  vllm_metadata.json      # plugin-owned schema (below)
+  generator_vllm.py       # the adapter class (+ any deps), or omit for a tt-metal built-in
+```
+
+`vllm_metadata.json` (the plugin owns this schema; `tt-kernel` ships it verbatim and reads
+only `arch` + the per-machine `launch` command):
+
+```json
+{
+  "arch": "LlamaForCausalLM",
+  "main_class": "models.tt_transformers.tt.generator_vllm:LlamaForCausalLM",
+  "hf_weights": "meta-llama/Llama-3.1-8B-Instruct",
+  "launch": {
+    "blackhole": {
+      "command": ["python3", "server_example_tt.py", "--model",
+                  "meta-llama/Llama-3.1-8B-Instruct", "--max_num_seqs", "8"],
+      "env": {"MESH_DEVICE": "P150", "VLLM_USE_V1": "1"}
+    },
+    "default": { "command": ["python3", "server_example_tt.py", "--model", "..."], "env": {} }
+  }
+}
+```
+
+- `arch` is the HF `architectures` name; the plugin registers it under its `TT`-prefix
+  convention (`TT<arch>`). Reference an existing tt-metal generator via `main_class` and the
+  folder needs no code; ship a novel adapter as `generator_vllm.py` in the folder.
+- `launch` is keyed per machine; `tt-kernel serve` selects the entry for the local machine
+  (`<arch>-<n>card` > `<arch>` > `default`, override with `TT_KERNEL_MACHINE`).
+
+Push, then serve:
+
+```bash
+tt-kernel push you/mymodel --private --backend vllm --bundle-dir ./my_bundle \
+  --weights meta-llama/Llama-3.1-8B-Instruct
+tt-kernel serve you/mymodel     # pulls the folder, sets EXTRA_MODELS_DIR, launches vLLM
+```
+
+On the serving host the vLLM plugin must be the fork that supports `EXTRA_MODELS_DIR`
+(`scripts/install.sh` sets this up). No plugin source edit is needed — the bundle registers
+itself.

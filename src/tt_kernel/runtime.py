@@ -24,8 +24,14 @@ from .manifest import WeightsRef
 ENV_MODELS_DIR = "TT_KERNEL_MODELS_DIR"
 # The dotted path of dispatch's serve entry point — used only to BUILD the printed
 # command string and to DETECT availability. Never imported.
-_DISPATCH_SERVE_MODULE = "tt_dispatch.serve"
-_DISPATCH_PKG = "tt_dispatch"
+_DISPATCH_SERVE_MODULE = "tt_api.serve"
+_DISPATCH_PKG = "tt_api"
+# The env var the Tenstorrent vLLM plugin reads to discover extra model bundle folders.
+# tt-kernel points it at the local bundles_dir at serve time; the plugin scans it and
+# registers every model folder found there.
+ENV_EXTRA_MODELS_DIR = "EXTRA_MODELS_DIR"
+_VLLM_PKG = "vllm"
+_VLLM_PLUGIN_PKG = "vllm_tt_plugin"
 
 
 def resolve_models_dir(models_dir: Optional[str], repo_id: str) -> Path:
@@ -177,6 +183,68 @@ def serve_command(runner_spec: str, weights_path: Path) -> str:
     return " ".join(serve_argv(str(weights_path), runner_spec=runner_spec, unsafe=True))
 
 
+# --------------------------------------------------------------------------- vLLM
+def vllm_available() -> bool:
+    """Whether the Tenstorrent vLLM serving stack (vLLM + the plugin) is importable here.
+
+    DETECTION only (``find_spec``) — never imports vLLM. Both the fork and the plugin must
+    be present for the serve handoff to work.
+    """
+    try:
+        return (
+            importlib.util.find_spec(_VLLM_PKG) is not None
+            and importlib.util.find_spec(_VLLM_PLUGIN_PKG) is not None
+        )
+    except (ImportError, ValueError):
+        return False
+
+
+def vllm_serve_env(bundles_dir: Path, launch_env: Optional[dict] = None) -> dict:
+    """The full environment for a vLLM serve subprocess.
+
+    Overlays ``EXTRA_MODELS_DIR`` (pointed at ``bundles_dir`` so the plugin discovers the
+    pulled model) and the bundle's per-machine launch env (``MESH_DEVICE``,
+    ``TT_*_VER``, ``VLLM_USE_V1``, weights-dir vars, …) onto the current environment.
+    """
+    env = dict(os.environ)
+    env[ENV_EXTRA_MODELS_DIR] = str(bundles_dir)
+    if launch_env:
+        env.update({str(k): str(v) for k, v in launch_env.items()})
+    return env
+
+
+def vllm_serve_argv(launch_command: List[str], *, python: Optional[str] = None) -> List[str]:
+    """The argv to launch the vLLM OpenAI server, from a bundle's per-machine command.
+
+    The bundle's ``launch.command`` is authoritative (e.g. ``["python3",
+    "server_example_tt.py", "--model", ...]``). ``python`` optionally overrides the
+    interpreter when the command's first token is a bare ``python``/``python3``.
+    """
+    argv = [str(c) for c in launch_command]
+    if python and argv and argv[0] in ("python", "python3"):
+        argv[0] = python
+    return argv
+
+
+def health_check(base_url: str, *, timeout: float = 5.0) -> tuple[bool, str]:
+    """Probe an OpenAI-compatible server's ``/v1/models`` (cheap liveness check).
+
+    Returns ``(ok, detail)``. Uses only the stdlib so tt-kernel adds no HTTP dependency.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = base_url.rstrip("/") + "/v1/models"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 — localhost health probe
+            code = resp.getcode()
+            return (200 <= code < 300, f"GET {url} -> {code}")
+    except urllib.error.URLError as exc:
+        return (False, f"GET {url} failed: {exc}")
+    except (OSError, ValueError) as exc:
+        return (False, f"GET {url} failed: {exc}")
+
+
 __all__ = [
     "resolve_models_dir",
     "download_weights",
@@ -186,4 +254,9 @@ __all__ = [
     "dispatch_available",
     "serve_argv",
     "serve_command",
+    "vllm_available",
+    "vllm_serve_env",
+    "vllm_serve_argv",
+    "health_check",
+    "ENV_EXTRA_MODELS_DIR",
 ]
