@@ -17,7 +17,7 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 
 
 class FileEntry(BaseModel):
@@ -60,31 +60,51 @@ class Producer(BaseModel):
 
 
 class RunnerPayload(BaseModel):
-    """The Python runner a bundle dispatches to. Two modes:
+    """The runner a bundle serves through. ``backend`` selects which serving layer and,
+    with it, which runner contract the payload satisfies:
 
-    - **packaged**: ``wheels`` is non-empty — the wheel(s) are stored under ``python/``
-      in the bundle and indexed in ``Manifest.files`` (path prefix ``python/``) so the
-      existing integrity check covers them. ``pull`` pip-installs them. Fully
-      reproducible — the answer for a custom/hand-tuned runner.
-    - **reference**: ``wheels`` is empty — the runner is *not* shipped; the consumer is
-      expected to already have it (e.g. registered in ``tt_inference_server``) or to
-      install it from ``source``. ``pull`` verifies it resolves but installs nothing.
+    - ``backend == "dispatch"`` (default, legacy): a Python runner for the dispatch
+      serving layer (``tt_api.serve``), contract ``generate()``/``generate_stream()``/
+      ``benchmark()``. Two modes:
 
-    ``spec`` is the opaque ``"module:Class"`` string the dispatch serving layer selects
-    via ``serve --runner`` / ``load_model(runner=...)``; tt-kernel records it but never
-    imports it.
+      - **packaged**: ``wheels`` is non-empty — the wheel(s) are stored under ``python/``
+        in the bundle and indexed in ``Manifest.files`` (path prefix ``python/``) so the
+        existing integrity check covers them. ``pull`` pip-installs them.
+      - **reference**: ``wheels`` is empty — the runner is *not* shipped; the consumer is
+        expected to already have it or to install it from ``source``.
+
+      ``spec`` is the opaque ``"module:Class"`` string dispatch selects via
+      ``serve --runner``; tt-kernel records it but never imports it.
+
+    - ``backend == "vllm"``: the model is served through the Tenstorrent vLLM plugin. The
+      payload is a self-contained bundle *folder* (``bundle_dir``) holding a plugin-owned
+      ``vllm_metadata.json`` (arch name, main-class path, per-machine launch command, HF
+      weights ref) plus the ``VllmGeneratorAdapter`` class and its dependencies. tt-kernel
+      lays the folder into ``EXTRA_MODELS_DIR`` at serve time; the plugin scans it and
+      registers the model. ``vllm_metadata.json`` — not this payload — is the source of
+      truth for the serving contract, so ``spec``/``wheels`` are unused for vLLM.
     """
 
-    spec: str  # "module:Class" for dispatch --runner
+    spec: str = ""  # "module:Class" for dispatch --runner (dispatch backend only)
     wheels: List[str] = Field(default_factory=list)  # filenames under python/; empty => reference
-    entry_point: Optional[str] = None  # name registered under tt_inference_server.runners
+    entry_point: Optional[str] = None  # name registered under tt_models.runners
     source: Optional[str] = None  # where to get a reference (not-shipped) runner: pip name / git URL
     requires_python: Optional[str] = None  # informational
+    backend: str = "dispatch"  # "dispatch" | "vllm"
+    # For backend=="vllm": path (within the bundle repo) of the folder holding
+    # vllm_metadata.json + the adapter class + its deps. None for dispatch backend.
+    bundle_dir: Optional[str] = None
 
     @property
     def is_packaged(self) -> bool:
-        """True when the bundle ships the runner wheel(s); False => reference-only."""
-        return bool(self.wheels)
+        """True when the bundle ships the runner wheel(s); False => reference-only.
+
+        For the vLLM backend the folder itself (``bundle_dir``) is the shipped payload."""
+        return bool(self.wheels) or (self.backend == "vllm" and self.bundle_dir is not None)
+
+    @property
+    def is_vllm(self) -> bool:
+        return self.backend == "vllm"
 
 
 class WeightsRef(BaseModel):
@@ -109,7 +129,10 @@ class Manifest(BaseModel):
     tt_metal_version: str  # MUST match local (per-kernel hash dependency)
     arch: str  # blackhole | wormhole_b0 | ...
     device_count: int = 1
-    build_key: int  # uint64; names the cache subtree on disk
+    # uint64 naming the cache subtree on disk. ``None`` => a kernels-less bundle (no
+    # precompiled cache shipped): the vLLM path JITs at first-run warmup into tt-metal's
+    # own local cache, and a dispatch bundle without kernels falls back to dynamic JIT.
+    build_key: Optional[int] = None
     build_key_inputs: BuildKeyInputs = Field(default_factory=BuildKeyInputs)
     kernel_count: int = 0
     # Whether the cache carries the traced-decode / on-device-lm_head kernels a fast-path
@@ -185,6 +208,12 @@ def compare(manifest: Manifest, local: "LocalEnv") -> CompatibilityReport:  # no
     - build_key inputs that differ change the build_key integer, so the consumer's
       tt-metal would look under a different directory => silent miss (forceable).
     - ``device_count`` mismatch is a warning (forceable).
+
+    A **kernels-less** bundle (``build_key is None``) ships no precompiled cache, so none
+    of the cache-dependent gates apply: only ``arch`` (still fatal — the adapter/kernels
+    JIT for a specific ISA) and ``device_count`` are checked. ``tt_metal_version`` is left
+    to ``runner_version_advisory`` (a warning), because a kernels-less runner is reusable
+    and the vLLM path re-warms its own kernels.
     """
     issues: List[Incompatibility] = []
     inp = manifest.build_key_inputs
@@ -193,6 +222,19 @@ def compare(manifest: Manifest, local: "LocalEnv") -> CompatibilityReport:  # no
         issues.append(
             Incompatibility(field="arch", expected=manifest.arch, detected=local.arch, fatal=True)
         )
+
+    if manifest.build_key is None:
+        # Kernels-less: skip every cache-dependent gate; only device_count is a warning.
+        if local.device_count and manifest.device_count != local.device_count:
+            issues.append(
+                Incompatibility(
+                    field="device_count",
+                    expected=str(manifest.device_count),
+                    detected=str(local.device_count),
+                    fatal=False,
+                )
+            )
+        return CompatibilityReport(compatible=not issues, issues=issues)
 
     if local.tt_metal_version and manifest.tt_metal_version != local.tt_metal_version:
         issues.append(

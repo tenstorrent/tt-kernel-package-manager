@@ -4,7 +4,7 @@
 """Validate the surrounding toolchain — and only ever *warn*, never install.
 
 tt-kernel is the front door, but it is not a package installer for the platform: it
-expects tt-metal, tt-lang, and tt-inference-server to already be present on the system
+expects tt-metal, tt-lang, and tt-api to already be present on the system
 and merely checks they are *adequate* versions, warning (with the required version) when
 they are not. This keeps tt-kernel's dependency surface tiny and never mutates the user's
 environment.
@@ -28,12 +28,13 @@ from . import metal
 LOCK = {
     "tt-metal": "0.72.0",
     "tt-lang": "1.1.3",
-    "tt-inference-server": "0.15.0",
+    "tt-api": "0.1.0",
 }
 
 # Distribution names each component may be installed under (first match wins).
 _TT_LANG_DISTS = ("ttl", "tt-lang", "ttlang", "tt_lang")
-_TT_IS_DISTS = ("tt-inference-server", "tt_inference_server")
+_TT_IS_DISTS = ("tt-api", "tt_api")
+_VLLM_DISTS = ("vllm",)
 
 
 @dataclass
@@ -109,15 +110,15 @@ def _spec_present(*module_names: str) -> bool:
     return False
 
 
-def _tt_inference_server_version() -> Optional[str]:
-    """Version of tt-inference-server. It is normally run from a checkout (not pip
+def _tt_api_version() -> Optional[str]:
+    """Version of tt-api. It is normally run from a checkout (not pip
     installed), so fall back from dist metadata to the repo ``VERSION`` file located
     relative to the importable package."""
     v = _dist_version(_TT_IS_DISTS)
     if v:
         return v
     try:
-        spec = importlib.util.find_spec("tt_inference_server")
+        spec = importlib.util.find_spec("tt_api")
     except (ImportError, ValueError):
         return None
     if spec is None or not spec.submodule_search_locations:
@@ -147,8 +148,30 @@ def _component(name: str, *, found: bool, version: Optional[str]) -> ComponentRe
                            f"version {version} is older than required {required} — upgrade")
 
 
+def _vllm_component() -> ComponentReport:
+    """Presence check for the Tenstorrent vLLM serving stack (fork + plugin).
+
+    The fork tracks the ``dev`` branch, so this is presence-based rather than a strict
+    version floor: both ``vllm`` and the ``vllm_tt_plugin`` package must be importable.
+    """
+    required = "tenstorrent/vllm@dev + plugin"
+    version = _dist_version(_VLLM_DISTS)
+    if not _spec_present("vllm"):
+        return ComponentReport(
+            "vllm", False, None, required, False,
+            "not found — install the Tenstorrent vLLM fork + plugin (see scripts/install.sh)",
+        )
+    if not _spec_present("vllm_tt_plugin"):
+        return ComponentReport(
+            "vllm", True, version, required, False,
+            "vllm present but the TT plugin (vllm_tt_plugin) is not importable — "
+            "pip install -e plugins/vllm-tt-plugin",
+        )
+    return ComponentReport("vllm", True, version, required, True, "ok (vllm + TT plugin present)")
+
+
 def check_toolchain() -> ToolchainReport:
-    """Inspect the local tt-metal / tt-lang / tt-inference-server. Never imports the
+    """Inspect the local tt-metal / tt-lang / tt-api / vLLM. Never imports the
     heavy modules and never installs anything — detection via metadata, find_spec, and
     the tt-metal version resolver already used by ``compare``."""
     tt_metal_version = metal.resolve_version()
@@ -159,9 +182,10 @@ def check_toolchain() -> ToolchainReport:
                    version=tt_metal_version),
         _component("tt-lang", found=_spec_present("ttl") or bool(tt_lang_version),
                    version=tt_lang_version),
-        _component("tt-inference-server",
-                   found=_spec_present("tt_inference_server"),
-                   version=_tt_inference_server_version()),
+        _component("tt-api",
+                   found=_spec_present("tt_api"),
+                   version=_tt_api_version()),
+        _vllm_component(),
     ])
 
 

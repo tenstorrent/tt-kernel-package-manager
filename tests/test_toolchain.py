@@ -28,22 +28,22 @@ def test_meets():
     assert _meets("gitsha", "0.1.0") is None  # unparseable -> unknown
 
 
-def _fake_detection(monkeypatch, *, tt_metal, tt_lang, tt_is):
+def _fake_detection(monkeypatch, *, tt_metal, tt_lang, tt_api):
     monkeypatch.setattr(metal, "resolve_version", lambda: tt_metal)
     monkeypatch.setattr(toolchain, "_dist_version",
                         lambda dists: tt_lang if dists is toolchain._TT_LANG_DISTS else None)
     monkeypatch.setattr(toolchain, "_spec_present", lambda *names: True)
-    monkeypatch.setattr(toolchain, "_tt_inference_server_version", lambda: tt_is)
+    monkeypatch.setattr(toolchain, "_tt_api_version", lambda: tt_api)
 
 
 def test_all_adequate(monkeypatch):
-    _fake_detection(monkeypatch, tt_metal="0.72.0", tt_lang="1.1.3", tt_is="0.15.0")
+    _fake_detection(monkeypatch, tt_metal="0.72.0", tt_lang="1.1.3", tt_api="0.1.0")
     report = check_toolchain()
     assert report.ok and not report.problems
 
 
 def test_old_version_flagged_not_fatal(monkeypatch):
-    _fake_detection(monkeypatch, tt_metal="0.72.0", tt_lang="1.0.0", tt_is="0.15.0")
+    _fake_detection(monkeypatch, tt_metal="0.72.0", tt_lang="1.0.0", tt_api="0.1.0")
     report = check_toolchain()
     assert not report.ok
     probs = {c.name for c in report.problems}
@@ -56,7 +56,7 @@ def test_missing_component(monkeypatch):
     monkeypatch.setattr(toolchain, "_dist_version", lambda dists: None)
     monkeypatch.setattr(toolchain, "_spec_present",
                         lambda *names: "ttl" not in names)  # tt-lang absent
-    monkeypatch.setattr(toolchain, "_tt_inference_server_version", lambda: "0.15.0")
+    monkeypatch.setattr(toolchain, "_tt_api_version", lambda: "0.1.0")
     report = check_toolchain()
     tt_lang = next(c for c in report.components if c.name == "tt-lang")
     assert not tt_lang.found and not tt_lang.adequate and "not found" in tt_lang.message
@@ -69,7 +69,7 @@ class _Dev:
 
 
 def test_doctor_exit_nonzero_when_inadequate(monkeypatch):
-    _fake_detection(monkeypatch, tt_metal="0.72.0", tt_lang="1.0.0", tt_is="0.15.0")
+    _fake_detection(monkeypatch, tt_metal="0.72.0", tt_lang="1.0.0", tt_api="0.1.0")
     monkeypatch.setattr(metal, "detect_device", lambda *a, **k: _Dev())
     res = runner.invoke(cli.app, ["doctor"])
     assert res.exit_code == 1, res.output
@@ -77,7 +77,7 @@ def test_doctor_exit_nonzero_when_inadequate(monkeypatch):
 
 
 def test_doctor_ok(monkeypatch):
-    _fake_detection(monkeypatch, tt_metal="0.72.0", tt_lang="1.1.3", tt_is="0.15.0")
+    _fake_detection(monkeypatch, tt_metal="0.72.0", tt_lang="1.1.3", tt_api="0.1.0")
     monkeypatch.setattr(metal, "detect_device", lambda *a, **k: _Dev())
     res = runner.invoke(cli.app, ["doctor"])
     assert res.exit_code == 0, res.output

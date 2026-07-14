@@ -89,6 +89,29 @@ def test_resolve_local_only_skips_hub(monkeypatch, tmp_path):
     assert not r.exists and called == []  # never touched the network
 
 
+def test_resolve_vllm_backend_from_manifest(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    m = Manifest(
+        name="v", tt_metal_version="0.72.0", arch="blackhole", build_key=None,
+        producer=Producer(tt_kernel_version="0.1.0", created_at="now"),
+        runner=RunnerPayload(backend="vllm", bundle_dir="vllm_bundle"),
+        weights=WeightsRef(repo_id="org/w"),
+    )
+    monkeypatch.setattr(hub, "fetch_manifest", lambda rid, rev: m)
+    r = resolve("org/vllm")
+    assert r.exists and r.is_vllm and r.has_runner and r.backend == "vllm"
+
+
+def test_resolve_vllm_backend_from_localdb(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    localdb.record("org/vllm", {
+        "name": "vllm", "backend": "vllm", "build_key": None, "arch": "blackhole",
+        "bundle_path": "/bundles/org__vllm", "installed_at": "now",
+    })
+    r = resolve("org/vllm", local_only=True)
+    assert r.installed and r.is_vllm and r.has_runner and r.bundle_path == "/bundles/org__vllm"
+
+
 # -------------------------------------------------------------------- run routing
 def _run(args, monkeypatch):
     monkeypatch.setattr(runtime, "dispatch_available", lambda: True)
