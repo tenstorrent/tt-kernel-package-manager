@@ -67,7 +67,13 @@ else
 fi
 
 echo ">> Installing vLLM fork + TT plugin (editable)"
-"$PY" -m pip install -e "$VLLM_DIR"
+# Tenstorrent has NO CUDA. Build vLLM with the 'empty' device target (no CUDA/other
+# device kernels compiled in) and pull CPU torch — all compute runs through the TT
+# out-of-tree platform (device "tt"), never CUDA. A plain `pip install` would default to
+# VLLM_TARGET_DEVICE=cuda, which is wrong here. Mirrors the plugin's canonical
+# docs/install-vllm-tt.sh.
+VLLM_TARGET_DEVICE=empty "$PY" -m pip install -e "$VLLM_DIR" \
+  --extra-index-url https://download.pytorch.org/whl/cpu
 "$PY" -m pip install -e "$VLLM_DIR/plugins/vllm-tt-plugin"
 
 # 2. Install tt-kernel.
