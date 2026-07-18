@@ -59,7 +59,7 @@ scripts/install.sh           # installs fork + plugin + tt-kernel into the tt-me
 
 ```bash
 tt-kernel login                                   # reuses huggingface_hub's token store
-tt-kernel doctor                                  # check tt-metal/tt-lang/tt-api/vLLM + hardware
+tt-kernel doctor                                  # check tt-metal/tt-lang/vLLM + hardware
 
 # vLLM (default) — serve a model through the Tenstorrent vLLM plugin
 tt-kernel serve you/mymodel                        # pull if needed, register, launch the OpenAI server
@@ -201,9 +201,9 @@ no build step. See **[web/README.md](web/README.md)**.
 
 ## Checking your toolchain
 
-`tt-kernel` expects the surrounding stack — tt-metal, tt-lang, tt-api, and the vLLM fork +
-plugin — to already be present on the system. It does **not** install them (use
-`scripts/install.sh` for that); it checks they are adequate and warns when they are not.
+`tt-kernel` expects the serving stack — tt-metal and the vLLM fork + plugin — to already be
+present on the system. It does **not** install them (use `scripts/install.sh` for that); it
+checks they are adequate and warns when they are not.
 
 ```bash
 tt-kernel doctor
@@ -212,8 +212,6 @@ tt-kernel doctor
 ```
 Toolchain:
   ✓ tt-metal: 0.72.1.dev3 (require >= 0.72.0) — ok
-  ✓ tt-lang: 1.1.3 (require >= 1.1.3) — ok
-  ✓ tt-api: 0.1.0 (require >= 0.1.0) — ok
   ✓ vllm: 0.11.0 (require >= tenstorrent/vllm@dev + plugin) — ok (vllm + TT plugin present)
 
 Hardware:
@@ -225,8 +223,7 @@ The vLLM check is presence-based (the fork tracks the `dev` branch): both `vllm`
 
 `doctor` exits non-zero if any component is missing or below the required version. `run` and
 `pull` run the same check and emit a warning (they do not abort) so a version skew is visible
-before it bites. tt-api is detected by import and its `VERSION` file (it is
-normally used from a checkout, not pip-installed).
+before it bites.
 
 ## How compatibility is enforced
 

@@ -443,7 +443,7 @@ def pull(
         env = metal.local_env(arch_override=arch, probe=probe)
         report = compare(manifest, env)
         _print_report(report)
-        _warn_toolchain()  # complements the kernel compat check with tt-lang / dispatch versions
+        _warn_toolchain()  # complements the kernel compat check with the serving-stack versions
 
         if report.has_fatal:
             raise _err("Refusing to install: fatal incompatibility (see above).")
@@ -576,7 +576,8 @@ def pull(
         typer.secho("  " + runtime.serve_command(manifest.runner.spec, weights_path),
                     fg=typer.colors.CYAN)
         if not runtime.dispatch_available():
-            typer.secho("  (install the dispatch serving package: pip install tt-api)",
+            typer.secho("  (legacy dispatch path; its runtime is not available here — "
+                        "prefer a vLLM bundle with `tt-kernel serve`)",
                         fg=typer.colors.YELLOW)
     elif manifest.runner:
         missing = []
@@ -685,7 +686,7 @@ def _warn_toolchain() -> None:
 
 @app.command()
 def doctor() -> None:
-    """Report whether the surrounding toolchain (tt-metal, tt-lang, tt-api)
+    """Report whether the surrounding toolchain (tt-metal, vLLM)
     and hardware are adequate. tt-kernel never installs these — it only checks and warns.
 
     Exits non-zero if any component is missing or below the required version.
@@ -715,12 +716,13 @@ def doctor() -> None:
 
 # ----------------------------------------------------------------------------- run
 def _handoff(argv: List[str], *, print_only: bool, why: str) -> None:
-    """Print or execute a dispatch ``serve`` handoff. Execution replaces this process's
-    foreground with the server (blocks until it exits)."""
+    """Print or execute a legacy dispatch ``serve`` handoff. Execution replaces this
+    process's foreground with the server (blocks until it exits)."""
     if not runtime.dispatch_available():
         typer.secho(
-            "  ! the dispatch serving package (tt_api) is not "
-            "importable here; install tt-api in this environment.",
+            "  ! this is the legacy dispatch serving path, and its runtime is not "
+            "available in this environment. The default serving path is vLLM — publish "
+            "the model as a vLLM bundle and use `tt-kernel serve <id>` instead.",
             fg=typer.colors.YELLOW,
         )
     typer.secho(f"[{why}]", fg=typer.colors.CYAN)
@@ -728,7 +730,10 @@ def _handoff(argv: List[str], *, print_only: bool, why: str) -> None:
         typer.echo(" ".join(argv))
         return
     if not runtime.dispatch_available():
-        raise _err("Cannot run: dispatch is not available (see above). Use --print to emit the command.")
+        raise _err(
+            "Cannot run: the legacy dispatch runtime is not available here (see above). "
+            "Use a vLLM bundle with `tt-kernel serve`, or `--print` to emit the command."
+        )
     try:
         raise typer.Exit(code=subprocess.run(argv).returncode)
     except KeyboardInterrupt:  # graceful Ctrl-C of the served process
@@ -1053,7 +1058,7 @@ def rm(
         typer.secho(f"✓ Removed {repo_id} (build_key {entry['build_key']})", fg=typer.colors.GREEN)
     else:
         typer.secho(
-            f"Index entry removed; cache subtree was already gone.", fg=typer.colors.YELLOW
+            "Index entry removed; cache subtree was already gone.", fg=typer.colors.YELLOW
         )
 
 

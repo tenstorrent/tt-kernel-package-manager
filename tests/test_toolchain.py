@@ -28,38 +28,45 @@ def test_meets():
     assert _meets("gitsha", "0.1.0") is None  # unparseable -> unknown
 
 
-def _fake_detection(monkeypatch, *, tt_metal, tt_lang, tt_api):
+def _fake_detection(monkeypatch, *, tt_metal):
     monkeypatch.setattr(metal, "resolve_version", lambda: tt_metal)
-    monkeypatch.setattr(toolchain, "_dist_version",
-                        lambda dists: tt_lang if dists is toolchain._TT_LANG_DISTS else None)
+    monkeypatch.setattr(toolchain, "_dist_version", lambda dists: None)
     monkeypatch.setattr(toolchain, "_spec_present", lambda *names: True)
-    monkeypatch.setattr(toolchain, "_tt_api_version", lambda: tt_api)
 
 
 def test_all_adequate(monkeypatch):
-    _fake_detection(monkeypatch, tt_metal="0.72.0", tt_lang="1.1.3", tt_api="0.1.0")
+    _fake_detection(monkeypatch, tt_metal="0.72.0")
     report = check_toolchain()
     assert report.ok and not report.problems
 
 
+def test_prototype_deps_not_checked(monkeypatch):
+    # tt-api and tt-lang are earlier-prototype leftovers: never reported as required.
+    _fake_detection(monkeypatch, tt_metal="0.72.0")
+    names = {c.name for c in check_toolchain().components}
+    assert "tt-api" not in names and "tt-lang" not in names
+    assert "tt-api" not in toolchain.LOCK and "tt-lang" not in toolchain.LOCK
+    # The default serving stack is exactly tt-metal + vLLM.
+    assert names == {"tt-metal", "vllm"}
+
+
 def test_old_version_flagged_not_fatal(monkeypatch):
-    _fake_detection(monkeypatch, tt_metal="0.72.0", tt_lang="1.0.0", tt_api="0.1.0")
+    _fake_detection(monkeypatch, tt_metal="0.71.9")  # below the 0.72.0 floor
     report = check_toolchain()
     assert not report.ok
     probs = {c.name for c in report.problems}
-    assert probs == {"tt-lang"}
+    assert probs == {"tt-metal"}
     assert "older than required" in next(c for c in report.problems).message
 
 
 def test_missing_component(monkeypatch):
-    monkeypatch.setattr(metal, "resolve_version", lambda: "0.72.0")
+    monkeypatch.setattr(metal, "resolve_version", lambda: None)
     monkeypatch.setattr(toolchain, "_dist_version", lambda dists: None)
-    monkeypatch.setattr(toolchain, "_spec_present",
-                        lambda *names: "ttl" not in names)  # tt-lang absent
-    monkeypatch.setattr(toolchain, "_tt_api_version", lambda: "0.1.0")
+    # ttnn absent => tt-metal not found; vllm + plugin present.
+    monkeypatch.setattr(toolchain, "_spec_present", lambda *names: "ttnn" not in names)
     report = check_toolchain()
-    tt_lang = next(c for c in report.components if c.name == "tt-lang")
-    assert not tt_lang.found and not tt_lang.adequate and "not found" in tt_lang.message
+    tt_metal = next(c for c in report.components if c.name == "tt-metal")
+    assert not tt_metal.found and not tt_metal.adequate and "not found" in tt_metal.message
 
 
 class _Dev:
@@ -69,15 +76,15 @@ class _Dev:
 
 
 def test_doctor_exit_nonzero_when_inadequate(monkeypatch):
-    _fake_detection(monkeypatch, tt_metal="0.72.0", tt_lang="1.0.0", tt_api="0.1.0")
+    _fake_detection(monkeypatch, tt_metal="0.71.9")
     monkeypatch.setattr(metal, "detect_device", lambda *a, **k: _Dev())
     res = runner.invoke(cli.app, ["doctor"])
     assert res.exit_code == 1, res.output
-    assert "tt-lang" in res.output
+    assert "tt-metal" in res.output
 
 
 def test_doctor_ok(monkeypatch):
-    _fake_detection(monkeypatch, tt_metal="0.72.0", tt_lang="1.1.3", tt_api="0.1.0")
+    _fake_detection(monkeypatch, tt_metal="0.72.0")
     monkeypatch.setattr(metal, "detect_device", lambda *a, **k: _Dev())
     res = runner.invoke(cli.app, ["doctor"])
     assert res.exit_code == 0, res.output
