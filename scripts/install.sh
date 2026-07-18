@@ -16,8 +16,9 @@
 # Usage:
 #   scripts/install.sh [--venv PATH] [--vllm-dir PATH] [--vllm-ref dev]
 #
-#   --venv      Python venv to install into (default: $VIRTUAL_ENV, else the tt-metal
-#               python_env if found under ~/dispatch/tt-metal, else the active python).
+#   --venv      Python venv to install into. Default: the active $VIRTUAL_ENV, else a tt-metal
+#               venv auto-detected by importable ttnn (searches $TT_METAL_HOME and the common
+#               ~/tt-metal, ~/dispatch/tt-metal, ~/projects/tt-metal layouts), else python3.
 #   --vllm-dir  Where to clone the vLLM fork (default: ~/dispatch/vllm).
 #   --vllm-ref  Branch/ref of the fork to use (default: dev — do not change to main).
 set -euo pipefail
@@ -42,9 +43,21 @@ if [ "$VLLM_REF" = "main" ]; then
   exit 2
 fi
 
-# Resolve the target python.
-if [ -z "$VENV" ] && [ -x "${HOME}/dispatch/tt-metal/python_env/bin/python3" ]; then
-  VENV="${HOME}/dispatch/tt-metal/python_env"
+# Resolve the target python: --venv > $VIRTUAL_ENV > the first tt-metal venv (in common
+# locations) whose python can import ttnn > system python3. No fixed workspace layout is
+# assumed — tt-metal lives in a different place on every machine.
+_ttnn_ok() { [ -x "$1/bin/python3" ] && "$1/bin/python3" -c "import ttnn" >/dev/null 2>&1; }
+
+if [ -z "$VENV" ]; then
+  for cand in \
+    ${TT_METAL_HOME:+"$TT_METAL_HOME/python_env"} \
+    "$HOME/tt-metal/python_env" \
+    "$HOME/dispatch/tt-metal/python_env" \
+    "$HOME/projects/tt-metal/python_env"; do
+    if _ttnn_ok "$cand"; then
+      VENV="$cand"; echo ">> Auto-detected tt-metal venv (ttnn importable): $VENV"; break
+    fi
+  done
 fi
 if [ -n "$VENV" ]; then
   PY="$VENV/bin/python3"
