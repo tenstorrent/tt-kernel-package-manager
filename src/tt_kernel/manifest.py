@@ -63,9 +63,9 @@ class RunnerPayload(BaseModel):
     """The runner a bundle serves through. ``backend`` selects which serving layer and,
     with it, which runner contract the payload satisfies:
 
-    - ``backend == "dispatch"`` (default, legacy): a Python runner for the dispatch
-      serving layer (``tt_api.serve``), contract ``generate()``/``generate_stream()``/
-      ``benchmark()``. Two modes:
+    - ``backend == "dispatch"`` (default, legacy): a Python runner following the legacy
+      contract (``generate()``/``generate_stream()``/``benchmark()``), served by tt-kernel's
+      own legacy-runner server (``tt_kernel.legacy_serve``). Two modes:
 
       - **packaged**: ``wheels`` is non-empty — the wheel(s) are stored under ``python/``
         in the bundle and indexed in ``Manifest.files`` (path prefix ``python/``) so the
@@ -73,8 +73,8 @@ class RunnerPayload(BaseModel):
       - **reference**: ``wheels`` is empty — the runner is *not* shipped; the consumer is
         expected to already have it or to install it from ``source``.
 
-      ``spec`` is the opaque ``"module:Class"`` string dispatch selects via
-      ``serve --runner``; tt-kernel records it but never imports it.
+      ``spec`` is the opaque ``"module:Class"`` string the legacy-runner server loads;
+      tt-kernel records it but never imports it.
 
     - ``backend == "vllm"``: the model is served through the Tenstorrent vLLM plugin. The
       payload is a self-contained bundle *folder* (``bundle_dir``) holding a plugin-owned

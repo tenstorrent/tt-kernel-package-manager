@@ -575,9 +575,9 @@ def pull(
         typer.echo("\nRun it:")
         typer.secho("  " + runtime.serve_command(manifest.runner.spec, weights_path),
                     fg=typer.colors.CYAN)
-        if not runtime.dispatch_available():
-            typer.secho("  (legacy dispatch path; its runtime is not available here — "
-                        "prefer a vLLM bundle with `tt-kernel serve`)",
+        if not runtime.legacy_serve_available():
+            typer.secho("  (the legacy-runner server needs fastapi + uvicorn: "
+                        "pip install 'tt-kernel[serve]')",
                         fg=typer.colors.YELLOW)
     elif manifest.runner:
         missing = []
@@ -716,23 +716,16 @@ def doctor() -> None:
 
 # ----------------------------------------------------------------------------- run
 def _handoff(argv: List[str], *, print_only: bool, why: str) -> None:
-    """Print or execute a legacy dispatch ``serve`` handoff. Execution replaces this
-    process's foreground with the server (blocks until it exits)."""
-    if not runtime.dispatch_available():
-        typer.secho(
-            "  ! this is the legacy dispatch serving path, and its runtime is not "
-            "available in this environment. The default serving path is vLLM — publish "
-            "the model as a vLLM bundle and use `tt-kernel serve <id>` instead.",
-            fg=typer.colors.YELLOW,
-        )
+    """Print or execute the legacy-runner server handoff (``tt_kernel.legacy_serve``).
+    Execution replaces this process's foreground with the server (blocks until it exits)."""
     typer.secho(f"[{why}]", fg=typer.colors.CYAN)
     if print_only:
         typer.echo(" ".join(argv))
         return
-    if not runtime.dispatch_available():
+    if not runtime.legacy_serve_available():
         raise _err(
-            "Cannot run: the legacy dispatch runtime is not available here (see above). "
-            "Use a vLLM bundle with `tt-kernel serve`, or `--print` to emit the command."
+            "Cannot serve: the legacy-runner server needs fastapi + uvicorn "
+            "(pip install 'tt-kernel[serve]'). Use `--print` to emit the command."
         )
     try:
         raise typer.Exit(code=subprocess.run(argv).returncode)
@@ -858,61 +851,57 @@ def run(
         False, "--local-only", help="Do not query the Hub; resolve only against installed bundles."
     ),
 ) -> None:
-    """Run a model through the right path: a curated bundle's runner if one exists,
-    otherwise dispatch's dynamic path on the bare HF repo.
+    """Serve a model through the right path.
 
-    Resolution ladder:
-      Tier 1  bundle installed with a runner  -> the author's runner + their kernels.
-      Tier 1' bundle published (not installed) -> notify it's available, then run dynamic.
-      Tier 2  bundle installed, kernels-only   -> dynamic path; the precompiled cache hits.
-      Tier 3  no bundle                         -> dynamic path on the bare HF id.
+    - **vLLM bundle** -> the Tenstorrent vLLM plugin (the default; same as `tt-kernel serve`).
+    - **legacy runner bundle** (a runner following the legacy contract in
+      docs/authoring_runners.md), once installed -> tt-kernel's own OpenAI-compatible
+      legacy-runner server (`tt_kernel.legacy_serve`).
+    - anything else (kernels-only bundle, or a bare HF repo) -> not servable by tt-kernel;
+      publish a vLLM bundle.
+
+    The old dynamic dispatch path (`tt_api.serve`) is retired.
     """
     _warn_toolchain()
     repo_id, revision = _split_revision(repo_id)
     res = resolve_mod.resolve(repo_id, revision=revision, local_only=local_only)
 
-    # vLLM bundles are served through the plugin (the primary path), not dispatch.
+    # vLLM bundle -> the plugin (default path).
     if res.is_vllm:
         _serve_vllm(repo_id, revision, print_only=print_only, local_only=local_only,
                     arch=None, bundles_dir=None, do_health=False)
         return
 
-    # Tier 1: a bundle that carries a runner.
+    # Legacy runner bundle -> tt-kernel's legacy-runner server. It needs the runner
+    # installed and the weights on disk, so it only works once the bundle is pulled.
     if res.has_runner:
-        if res.installed:
-            target = res.weights_path or res.weights_repo or repo_id
-            argv = runtime.serve_argv(target, runner_spec=res.runner_spec, unsafe=True,
+        if res.installed and res.weights_path:
+            argv = runtime.serve_argv(res.weights_path, runner_spec=res.runner_spec,
                                       python=sys.executable)
             _handoff(argv, print_only=print_only,
-                     why=f"custom runner {res.runner_spec} (build_key {res.build_key})")
+                     why=f"legacy runner {res.runner_spec} via tt_kernel.legacy_serve")
             return
-        # Published but not installed: notify it's available, then do what the user asked.
+        if res.installed:
+            raise _err(
+                f"{repo_id} is installed but its weights are not on disk. Re-run "
+                f"`tt-kernel pull {repo_id}` (without --no-weights) so the runner can load."
+            )
         typer.secho(
-            f"A tuned tt-kernel bundle exists for {repo_id} "
-            f"(runner {res.runner_spec}, build_key {res.build_key}).",
+            f"A tt-kernel bundle exists for {repo_id} (legacy runner {res.runner_spec}).",
             fg=typer.colors.YELLOW,
         )
-        typer.secho(f"  For the author's tuned path:  tt-kernel pull {repo_id}",
+        typer.secho(f"  Install it first:  tt-kernel pull {repo_id}", fg=typer.colors.YELLOW)
+        typer.secho("  then `tt-kernel run` serves it via the legacy-runner server.",
                     fg=typer.colors.YELLOW)
-        target = res.weights_repo or repo_id
-        argv = runtime.serve_argv(target, unsafe=True, python=sys.executable)
-        _handoff(argv, print_only=print_only,
-                 why="dynamic dispatch (tuned bundle available but not installed)")
         return
 
-    # Tier 2/3: no runner. Dynamic path; an installed kernels-only cache hits on disk.
-    target = res.serve_target or repo_id
-    if res.exists:
-        typer.secho(
-            f"Precompiled kernels present for {repo_id} (build_key {res.build_key}); "
-            "dispatch dynamic path will hit the cache.",
-            fg=typer.colors.GREEN,
-        )
-        why = "dynamic dispatch (precompiled kernel cache)"
-    else:
-        why = "dynamic dispatch (no bundle; bare HF repo)"
-    argv = runtime.serve_argv(target, unsafe=True, python=sys.executable)
-    _handoff(argv, print_only=print_only, why=why)
+    # No runner (kernels-only bundle, or a bare HF repo): the dynamic dispatch path is
+    # retired. tt-kernel serves vLLM bundles and legacy-runner bundles only.
+    raise _err(
+        f"Nothing to serve for {repo_id}. tt-kernel serves vLLM bundles "
+        f"(`tt-kernel serve <id>`) and legacy-runner bundles. To serve this model, publish "
+        "it as a vLLM bundle — see docs/authoring_runners.md."
+    )
 
 
 # ---------------------------------------------------------------------------- info

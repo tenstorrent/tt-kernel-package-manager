@@ -1,19 +1,26 @@
-# Authoring a runner that works with `tt-kernel`
+# Authoring a model for `tt-kernel`
 
-A v2 `tt-kernel` bundle can carry three things so that a single `tt-kernel pull` gets a
-model running: the **compiled kernel cache**, the **model weights** (a reference to an HF
-repo), and a **Python runner** — the code that actually executes the model's tt-nn graph.
+There are two ways to make a model `pull`-and-serve with `tt-kernel`:
 
-This guide is for the person *producing* a bundle. It explains how to write and package
-the runner so the package manager can install it and the dispatch serving layer can select
-and drive it. Get these rules right and your model is `pull`-and-serve for everyone else.
+- **vLLM bundle — the default.** Author a `VllmGeneratorAdapter` and ship a small bundle
+  folder; `tt-kernel serve` runs it through the Tenstorrent vLLM plugin (batching, paging,
+  the real serving path). **This is what you almost certainly want.** Jump to
+  **[Authoring a vLLM bundle](#authoring-a-vllm-bundle-the-default---backend-vllm)**.
+- **Legacy runner bundle.** A duck-typed `generate()`/`generate_stream()` runner, served by
+  tt-kernel's own minimal `legacy_serve` server. This path is **retired-but-supported**: it
+  exists so an already-built legacy runner isn't stranded. It has none of vLLM's batching or
+  performance — do not start here for a new model.
 
-> The runtime contract below mirrors the dispatch serving layer's `BaseRunner`
-> (`tt-models`: `tt_models/docs/custom_runners.md`). `tt-kernel`
-> itself never imports your runner — it only ships the wheel and records the selector string.
-> The contract is the only shared surface.
+> ⚠️ If you are starting fresh, author a **vLLM bundle**. The legacy runner sections (1–5)
+> below are only for an existing runner that already follows the old contract.
 
 ---
+
+## Legacy runner bundles (retired serving path)
+
+> **Legacy.** New models should be vLLM bundles (see the bottom of this guide). This section
+> documents the older runner contract, served by `python -m tt_kernel.legacy_serve` (a small
+> OpenAI-compatible shim that ships with tt-kernel — no external serving runtime required).
 
 ## 1. Implement the runner contract
 
@@ -184,11 +191,12 @@ tt-kernel pull <ns>/<model>-blackhole
 ```
 
 installs the kernel cache, `pip install --no-deps` your wheel, downloads the weights, records
-the binding, and prints the exact command to serve:
+the binding, and prints the exact command to serve via tt-kernel's legacy-runner server
+(needs `pip install 'tt-kernel[serve]'` for fastapi + uvicorn):
 
 ```
-python -m tt_api.serve serve --unsafe \
-    --runner ttrunner_mymodel.runner:MyRunner <weights-path>
+python -m tt_kernel.legacy_serve \
+    --runner ttrunner_mymodel.runner:MyRunner --model <weights-path>
 ```
 
 Skip flags (`--no-python`, `--no-weights`, `--kernels-only`) let users install parts. A
@@ -221,10 +229,10 @@ re-pull is idempotent.
 
 ---
 
-## Authoring a **vLLM** bundle (`--backend vllm`)
+## Authoring a vLLM bundle (the default, `--backend vllm`)
 
-The runner contract above is for the *dispatch* serving layer. To instead serve through the
-Tenstorrent **vLLM** plugin (`tenstorrent/vllm`, the primary path), the model's runner is a
+**This is the recommended path for any new model.** Serving goes through the Tenstorrent
+**vLLM** plugin (`tenstorrent/vllm`), so the model's runner is a
 `VllmGeneratorAdapter` — a low-level paged-attention adapter (`initialize_vllm_model`,
 `prefill_forward`, `decode_forward`, `allocate_kv_cache`, `warmup_model_*`, …), *not* a
 `generate()`/`generate_stream()` runner. See the contract at

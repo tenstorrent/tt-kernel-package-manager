@@ -22,10 +22,10 @@ from typing import List, Optional
 from .manifest import WeightsRef
 
 ENV_MODELS_DIR = "TT_KERNEL_MODELS_DIR"
-# The dotted path of dispatch's serve entry point — used only to BUILD the printed
-# command string and to DETECT availability. Never imported.
-_DISPATCH_SERVE_MODULE = "tt_api.serve"
-_DISPATCH_PKG = "tt_api"
+# tt-kernel's own minimal OpenAI server for a legacy (dispatch-contract) runner. This
+# replaces the retired dispatch runtime the runner used to hand off to. Used to BUILD the
+# serve command; the module is only run as a subprocess, never imported here.
+_LEGACY_SERVE_MODULE = "tt_kernel.legacy_serve"
 # The env var the Tenstorrent vLLM plugin reads to discover extra model bundle folders.
 # tt-kernel points it at the local bundles_dir at serve time; the plugin scans it and
 # registers every model folder found there.
@@ -117,14 +117,15 @@ def ttnn_importable(python: Optional[str] = None) -> bool:
         return False
 
 
-def dispatch_available() -> bool:
-    """Whether the dispatch serving package is importable here (DETECTION only).
+def legacy_serve_available() -> bool:
+    """Whether the legacy-runner server (``tt_kernel.legacy_serve``) can actually run here.
 
-    Uses ``find_spec`` so we never import (and never execute) dispatch — tt-kernel must
-    not depend on it.
+    The module itself always imports (it ships with tt-kernel), so what matters is its
+    web-server dependencies. DETECTION only — ``find_spec`` never imports them.
     """
     try:
-        return importlib.util.find_spec(_DISPATCH_PKG) is not None
+        return (importlib.util.find_spec("fastapi") is not None
+                and importlib.util.find_spec("uvicorn") is not None)
     except (ImportError, ValueError):
         return False
 
@@ -158,29 +159,22 @@ def runner_spec_importable(spec: str, python: Optional[str] = None) -> bool:
 def serve_argv(
     model: str,
     *,
-    runner_spec: Optional[str] = None,
-    unsafe: bool = True,
+    runner_spec: str,
     python: Optional[str] = None,
 ) -> List[str]:
-    """Argv for dispatch's serve entry point — the canonical handoff form.
+    """Argv for the legacy-runner server — ``tt_kernel.legacy_serve``.
 
-    ``serve`` always requires ``--unsafe`` (it is the prototype's acknowledgement gate,
-    not the per-model trust gate — dispatch decides community gating itself), so it
-    defaults on. ``runner_spec`` selects a custom runner (Tier 1); omit it for the
-    dynamic path (Tier 2/3), where ``model`` is the weights dir or a bare HF id.
+    ``runner_spec`` is required: the shim serves one specific runner (there is no dynamic
+    / bare-repo path anymore — that was the retired dispatch runtime). ``model`` is the
+    local weights dir the runner loads.
     """
-    argv = [python or "python", "-m", _DISPATCH_SERVE_MODULE, "serve"]
-    if unsafe:
-        argv.append("--unsafe")
-    if runner_spec:
-        argv += ["--runner", runner_spec]
-    argv.append(str(model))
-    return argv
+    return [python or "python", "-m", _LEGACY_SERVE_MODULE,
+            "--runner", runner_spec, "--model", str(model)]
 
 
 def serve_command(runner_spec: str, weights_path: Path) -> str:
-    """The exact ready-to-run line for dispatch's OpenAI-compatible server (Tier 1)."""
-    return " ".join(serve_argv(str(weights_path), runner_spec=runner_spec, unsafe=True))
+    """The exact ready-to-run line for the legacy-runner OpenAI server."""
+    return " ".join(serve_argv(str(weights_path), runner_spec=runner_spec))
 
 
 # --------------------------------------------------------------------------- vLLM
@@ -251,7 +245,7 @@ __all__ = [
     "pip_install_wheels",
     "ttnn_importable",
     "runner_spec_importable",
-    "dispatch_available",
+    "legacy_serve_available",
     "serve_argv",
     "serve_command",
     "vllm_available",

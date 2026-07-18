@@ -109,17 +109,17 @@ def test_download_weights_forwards_args(monkeypatch, tmp_path):
 def test_serve_command_exact():
     cmd = runtime.serve_command("pkg.mod:Runner", Path("/models/org/m"))
     assert cmd == (
-        "python -m tt_api.serve serve --unsafe "
-        "--runner pkg.mod:Runner /models/org/m"
+        "python -m tt_kernel.legacy_serve "
+        "--runner pkg.mod:Runner --model /models/org/m"
     )
 
 
-def test_dispatch_available_uses_find_spec(monkeypatch):
+def test_legacy_serve_available_uses_find_spec(monkeypatch):
     import importlib.util
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
-    assert runtime.dispatch_available() is True
+    assert runtime.legacy_serve_available() is True  # fastapi + uvicorn present
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
-    assert runtime.dispatch_available() is False
+    assert runtime.legacy_serve_available() is False
 
 
 def test_ttnn_importable_current_interpreter(monkeypatch):
