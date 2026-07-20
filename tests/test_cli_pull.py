@@ -85,7 +85,7 @@ def wired(monkeypatch, tmp_path):
                         lambda w, dest: calls["weights"].append(w.repo_id) or dest)
     monkeypatch.setattr(runtime, "ttnn_importable", lambda python=None: True)
     monkeypatch.setattr(runtime, "runner_spec_importable", lambda spec, python=None: True)
-    monkeypatch.setattr(runtime, "dispatch_available", lambda: True)
+    monkeypatch.setattr(runtime, "legacy_serve_available", lambda: True)
 
     state = {"opts": {}}
 
@@ -111,7 +111,7 @@ def test_pull_full_installs_everything(wired):
     assert calls["pip"] == [[WHEEL_NAME]]
     assert calls["weights"] == ["org/model"]
     # ready-to-run command printed
-    assert "serve --unsafe --runner pkg.mod:Runner" in res.output
+    assert "tt_kernel.legacy_serve --runner pkg.mod:Runner" in res.output
     rec = localdb.get("org/demo-bh")
     assert rec["python_installed"] is True
     assert rec["weights_installed"] is True
@@ -193,7 +193,7 @@ def test_pull_reference_runner_resolves_without_pip(wired):
     assert calls["pip"] == []  # reference => nothing shipped to install
     assert calls["weights"] == ["org/model"]
     assert "reference; not shipped" in res.output
-    assert "serve --unsafe --runner pkg.mod:Runner" in res.output
+    assert "tt_kernel.legacy_serve --runner pkg.mod:Runner" in res.output
     rec = localdb.get("org/demo-bh")
     assert rec["python_installed"] is False
     assert rec["runner_spec"] == "pkg.mod:Runner"

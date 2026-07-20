@@ -114,46 +114,42 @@ def test_resolve_vllm_backend_from_localdb(monkeypatch, tmp_path):
 
 # -------------------------------------------------------------------- run routing
 def _run(args, monkeypatch):
-    monkeypatch.setattr(runtime, "dispatch_available", lambda: True)
+    monkeypatch.setattr(runtime, "legacy_serve_available", lambda: True)
     return runner.invoke(cli.app, ["run", *args, "--print", "--local-only"])
 
 
-def test_run_tier1_installed_uses_custom_runner(monkeypatch, tmp_path):
+def test_run_installed_legacy_runner_uses_legacy_serve(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     _seed_installed("org/tuned", runner_spec="pkg:R", weights_path="/w/t", python_installed=True)
     res = _run(["org/tuned"], monkeypatch)
     assert res.exit_code == 0, res.output
-    assert "--runner pkg:R" in res.output and "/w/t" in res.output
-    assert "custom runner" in res.output
+    # legacy-runner server command, not the retired tt_api dispatch path
+    assert "tt_kernel.legacy_serve" in res.output
+    assert "--runner pkg:R" in res.output and "--model /w/t" in res.output
+    assert "tt_api" not in res.output
 
 
-def test_run_tier2_kernels_only_is_dynamic_on_weights(monkeypatch, tmp_path):
+def test_run_kernels_only_is_not_servable(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    _seed_installed("org/cache", weights_repo="org/weights")
+    _seed_installed("org/cache", weights_repo="org/weights")  # no runner
     res = _run(["org/cache"], monkeypatch)
-    assert res.exit_code == 0, res.output
-    assert "--runner" not in res.output                # no custom runner
-    assert "serve --unsafe org/weights" in res.output  # dynamic on the weights repo
-    assert "Precompiled kernels present" in res.output
+    assert res.exit_code == 1
+    assert "Nothing to serve" in res.output
+    assert "tt_api" not in res.output
 
 
-def test_run_tier3_no_bundle_is_dynamic_on_bare_id(monkeypatch, tmp_path):
+def test_run_bare_repo_is_not_servable(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
     res = _run(["some/hf-model"], monkeypatch)
-    assert res.exit_code == 0, res.output
-    assert "--runner" not in res.output
-    assert "serve --unsafe some/hf-model" in res.output
-    assert "no bundle" in res.output
+    assert res.exit_code == 1
+    assert "Nothing to serve" in res.output
 
 
-def test_run_tier1_published_notifies_then_runs_dynamic(monkeypatch, tmp_path):
+def test_run_published_legacy_runner_says_pull_first(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
-    # local_only is forced by _run, so seed the "published" path via a non-local resolve:
-    monkeypatch.setattr(runtime, "dispatch_available", lambda: True)
     monkeypatch.setattr(hub, "fetch_manifest", lambda rid, rev: _published_manifest(with_runner=True))
     res = runner.invoke(cli.app, ["run", "org/pub", "--print"])  # allow Hub lookup
     assert res.exit_code == 0, res.output
-    assert "tuned tt-kernel bundle exists" in res.output
+    assert "legacy runner" in res.output
     assert "tt-kernel pull org/pub" in res.output
-    assert "--runner" not in res.output                # ran dynamic, not the bundle's runner
-    assert "serve --unsafe org/weights" in res.output  # dynamic on the bundle's weights repo
+    assert "tt_api" not in res.output                  # no dead dispatch command emitted

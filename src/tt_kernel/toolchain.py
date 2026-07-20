@@ -4,36 +4,28 @@
 """Validate the surrounding toolchain — and only ever *warn*, never install.
 
 tt-kernel is the front door, but it is not a package installer for the platform: it
-expects tt-metal, tt-lang, and tt-api to already be present on the system
-and merely checks they are *adequate* versions, warning (with the required version) when
-they are not. This keeps tt-kernel's dependency surface tiny and never mutates the user's
-environment.
-
-The version lock below mirrors ``~/dispatch/docs/hardware.md`` ("Toolchain Version Lock")
-— bump both together. It is plain constants (no TOML/parser dependency, 3.9-safe).
+expects the serving stack (tt-metal and the vLLM fork/plugin) to already be present on the
+system and merely checks it is *adequate*, warning (with the required version) when it is
+not. This keeps tt-kernel's dependency surface tiny and never mutates the user's environment.
 """
 
 from __future__ import annotations
 
 import importlib.metadata as md
 import importlib.util
-import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import List, Optional, Tuple
 
 from . import metal
 
-# Minimum adequate versions of the surrounding stack. Mirror docs/hardware.md.
+# The default serving stack is tt-metal plus the vLLM fork/plugin. tt-lang and tt-api are
+# leftovers from an earlier serving prototype and are not part of the vLLM path, so they are
+# not checked here (checking them only produced spurious "missing dependency" warnings).
 LOCK = {
     "tt-metal": "0.72.0",
-    "tt-lang": "1.1.3",
-    "tt-api": "0.1.0",
 }
 
 # Distribution names each component may be installed under (first match wins).
-_TT_LANG_DISTS = ("ttl", "tt-lang", "ttlang", "tt_lang")
-_TT_IS_DISTS = ("tt-api", "tt_api")
 _VLLM_DISTS = ("vllm",)
 
 
@@ -110,29 +102,6 @@ def _spec_present(*module_names: str) -> bool:
     return False
 
 
-def _tt_api_version() -> Optional[str]:
-    """Version of tt-api. It is normally run from a checkout (not pip
-    installed), so fall back from dist metadata to the repo ``VERSION`` file located
-    relative to the importable package."""
-    v = _dist_version(_TT_IS_DISTS)
-    if v:
-        return v
-    try:
-        spec = importlib.util.find_spec("tt_api")
-    except (ImportError, ValueError):
-        return None
-    if spec is None or not spec.submodule_search_locations:
-        return None
-    pkg_dir = Path(list(spec.submodule_search_locations)[0])
-    version_file = pkg_dir.parent / "VERSION"  # <repo>/VERSION, sibling of the package
-    if version_file.is_file():
-        try:
-            return version_file.read_text().strip()
-        except OSError:
-            return None
-    return None
-
-
 def _component(name: str, *, found: bool, version: Optional[str]) -> ComponentReport:
     required = LOCK[name]
     if not found:
@@ -171,20 +140,14 @@ def _vllm_component() -> ComponentReport:
 
 
 def check_toolchain() -> ToolchainReport:
-    """Inspect the local tt-metal / tt-lang / tt-api / vLLM. Never imports the
-    heavy modules and never installs anything — detection via metadata, find_spec, and
-    the tt-metal version resolver already used by ``compare``."""
+    """Inspect the local tt-metal + vLLM serving stack. Never imports the heavy modules and
+    never installs anything — detection via metadata, find_spec, and the tt-metal version
+    resolver already used by ``compare``. tt-lang and tt-api (leftovers from an earlier
+    serving prototype) are not part of the vLLM path and are not checked."""
     tt_metal_version = metal.resolve_version()
-    tt_lang_version = _dist_version(_TT_LANG_DISTS)
-
     return ToolchainReport(components=[
         _component("tt-metal", found=bool(tt_metal_version) or _spec_present("ttnn"),
                    version=tt_metal_version),
-        _component("tt-lang", found=_spec_present("ttl") or bool(tt_lang_version),
-                   version=tt_lang_version),
-        _component("tt-api",
-                   found=_spec_present("tt_api"),
-                   version=_tt_api_version()),
         _vllm_component(),
     ])
 
