@@ -8,6 +8,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -803,9 +804,13 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
                 fg=typer.colors.CYAN)
     typer.secho(f"  OpenAI endpoint (once up): {endpoint}", fg=typer.colors.CYAN)
     if print_only:
-        exports = " ".join(f"{k}={v}" for k, v in
+        # Shell-quote both halves: a launch command may legitimately carry spaces and quotes
+        # (a --tt-config JSON blob, an --additional-server-args string, a `bash -c` payload).
+        # A plain join would emit something that re-parses into different argv than the one
+        # `serve` actually execs — and --print exists to be pasted into a shell.
+        exports = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in
                            {runtime.ENV_EXTRA_MODELS_DIR: str(extra_models_dir), **launch.env}.items())
-        typer.echo(f"{exports} " + " ".join(argv))
+        typer.echo(f"{exports} " + shlex.join(argv))
         return
     if not runtime.vllm_available():
         raise _err(
