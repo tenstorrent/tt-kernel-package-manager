@@ -43,17 +43,26 @@ win; nothing overrides them.
 
 ## Install
 
+### Quick Install (modifies your environment)
+
 ```bash
 pip install tt-kernel        # from this repo: pip install -e .
 ```
 
-To serve, you also need the Tenstorrent **vLLM fork + plugin** on top of a working tt-metal
-env. `scripts/install.sh` sets up the whole serving stack (vLLM fork + plugin + tt-kernel) and
+To serve, you also need **vLLM + the Tenstorrent vLLM plugin** on top of a working tt-metal
+env. `scripts/install.sh` sets up the whole serving stack (vLLM + plugin + tt-kernel) and
 runs `tt-kernel doctor`:
 
 ```bash
-scripts/install.sh           # installs fork + plugin + tt-kernel into the tt-metal venv
+scripts/install.sh           # installs vLLM + plugin + tt-kernel into the tt-metal venv
 ```
+
+**No vLLM fork is required.** Everything Tenstorrent-specific lives in
+[`tenstorrent/vllm-tt-plugin`](https://github.com/tenstorrent/vllm-tt-plugin), which registers
+the `tt` platform through vLLM's standard plugin entry points, so the installer builds
+**upstream** vLLM (`VLLM_TARGET_DEVICE=empty`) and installs the plugin alongside it. The older
+`tenstorrent/vllm` fork is being retired; `scripts/install.sh --vllm-dir <fork>` still installs
+from a fork checkout for existing pinned environments, with a deprecation warning.
 
 ## Usage
 
@@ -201,7 +210,7 @@ no build step. See **[web/README.md](web/README.md)**.
 
 ## Checking your toolchain
 
-`tt-kernel` expects the serving stack — tt-metal and the vLLM fork + plugin — to already be
+`tt-kernel` expects the serving stack — tt-metal, and vLLM plus the TT plugin — to already be
 present on the system. It does **not** install them (use `scripts/install.sh` for that); it
 checks they are adequate and warns when they are not.
 
@@ -212,14 +221,15 @@ tt-kernel doctor
 ```
 Toolchain:
   ✓ tt-metal: 0.72.1.dev3 (require >= 0.72.0) — ok
-  ✓ vllm: 0.11.0 (require >= tenstorrent/vllm@dev + plugin) — ok (vllm + TT plugin present)
+  ✓ vllm: 0.24.0 (require >= vllm + vllm_tt_plugin) — ok (vllm + TT plugin present)
 
 Hardware:
   ✓ arch=blackhole devices=1 (via tt-smi)
 ```
 
-The vLLM check is presence-based (the fork tracks the `dev` branch): both `vllm` and the
-`vllm_tt_plugin` package must be importable.
+The vLLM check is presence-based and provenance-agnostic: both `vllm` and the
+`vllm_tt_plugin` package must be importable. Upstream vLLM satisfies it — a fork is neither
+required nor detected.
 
 `doctor` exits non-zero if any component is missing or below the required version. `run` and
 `pull` run the same check and emit a warning (they do not abort) so a version skew is visible

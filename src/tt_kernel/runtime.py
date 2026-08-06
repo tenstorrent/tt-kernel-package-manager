@@ -179,10 +179,11 @@ def serve_command(runner_spec: str, weights_path: Path) -> str:
 
 # --------------------------------------------------------------------------- vLLM
 def vllm_available() -> bool:
-    """Whether the Tenstorrent vLLM serving stack (vLLM + the plugin) is importable here.
+    """Whether the vLLM serving stack (vLLM + the Tenstorrent plugin) is importable here.
 
-    DETECTION only (``find_spec``) — never imports vLLM. Both the fork and the plugin must
-    be present for the serve handoff to work.
+    DETECTION only (``find_spec``) — never imports vLLM. Both ``vllm`` and ``vllm_tt_plugin``
+    must be present for the serve handoff to work. Provenance-agnostic: upstream vLLM plus
+    the standalone plugin is the supported path; the legacy fork also satisfies this.
     """
     try:
         return (

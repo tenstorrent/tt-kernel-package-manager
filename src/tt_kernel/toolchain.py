@@ -4,8 +4,8 @@
 """Validate the surrounding toolchain — and only ever *warn*, never install.
 
 tt-kernel is the front door, but it is not a package installer for the platform: it
-expects the serving stack (tt-metal and the vLLM fork/plugin) to already be present on the
-system and merely checks it is *adequate*, warning (with the required version) when it is
+expects the serving stack (tt-metal, and vLLM plus the TT plugin) to already be present on
+the system and merely checks it is *adequate*, warning (with the required version) when it is
 not. This keeps tt-kernel's dependency surface tiny and never mutates the user's environment.
 """
 
@@ -18,7 +18,7 @@ from typing import List, Optional, Tuple
 
 from . import metal
 
-# The default serving stack is tt-metal plus the vLLM fork/plugin. tt-lang and tt-api are
+# The default serving stack is tt-metal plus vLLM and the TT plugin. tt-lang and tt-api are
 # leftovers from an earlier serving prototype and are not part of the vLLM path, so they are
 # not checked here (checking them only produced spurious "missing dependency" warnings).
 LOCK = {
@@ -118,17 +118,20 @@ def _component(name: str, *, found: bool, version: Optional[str]) -> ComponentRe
 
 
 def _vllm_component() -> ComponentReport:
-    """Presence check for the Tenstorrent vLLM serving stack (fork + plugin).
+    """Presence check for the vLLM serving stack (vLLM + the Tenstorrent plugin).
 
-    The fork tracks the ``dev`` branch, so this is presence-based rather than a strict
-    version floor: both ``vllm`` and the ``vllm_tt_plugin`` package must be importable.
+    Deliberately provenance-agnostic: everything TT-specific lives in ``vllm_tt_plugin``,
+    which registers the ``tt`` platform through vLLM's standard plugin entry points and
+    works against upstream vLLM. No fork is required (the legacy ``tenstorrent/vllm`` fork
+    still satisfies this check, but is being retired). Presence-based rather than a strict
+    version floor: both ``vllm`` and ``vllm_tt_plugin`` must simply be importable.
     """
-    required = "tenstorrent/vllm@dev + plugin"
+    required = "vllm + vllm_tt_plugin"
     version = _dist_version(_VLLM_DISTS)
     if not _spec_present("vllm"):
         return ComponentReport(
             "vllm", False, None, required, False,
-            "not found — install the Tenstorrent vLLM fork + plugin (see scripts/install.sh)",
+            "not found — install vLLM + the Tenstorrent plugin (see scripts/install.sh)",
         )
     if not _spec_present("vllm_tt_plugin"):
         return ComponentReport(

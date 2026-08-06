@@ -232,7 +232,7 @@ re-pull is idempotent.
 ## Authoring a vLLM bundle (the default, `--backend vllm`)
 
 **This is the recommended path for any new model.** Serving goes through the Tenstorrent
-**vLLM** plugin (`tenstorrent/vllm`), so the model's runner is a
+**vLLM plugin** (`tenstorrent/vllm-tt-plugin`, running on upstream vLLM), so the runner is a
 `VllmGeneratorAdapter` — a low-level paged-attention adapter (`initialize_vllm_model`,
 `prefill_forward`, `decode_forward`, `allocate_kv_cache`, `warmup_model_*`, …), *not* a
 `generate()`/`generate_stream()` runner. See the contract at
@@ -281,6 +281,8 @@ tt-kernel push you/mymodel --private --backend vllm --bundle-dir ./my_bundle \
 tt-kernel serve you/mymodel     # pulls the folder, sets EXTRA_MODELS_DIR, launches vLLM
 ```
 
-On the serving host the vLLM plugin must be the fork that supports `EXTRA_MODELS_DIR`
-(`scripts/install.sh` sets this up). No plugin source edit is needed — the bundle registers
-itself.
+On the serving host the TT vLLM plugin (`vllm_tt_plugin`) must be recent enough to scan
+`EXTRA_MODELS_DIR` — that discovery lives entirely in the plugin's `platform.py`, so **no
+vLLM fork is required**; upstream vLLM plus the standalone `tenstorrent/vllm-tt-plugin`
+works (`scripts/install.sh` sets this up). No plugin source edit is needed — the bundle
+registers itself.
