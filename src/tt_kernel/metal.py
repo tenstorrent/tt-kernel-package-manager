@@ -50,6 +50,9 @@ class LocalEnv:
     # ``tt_metal_version`` doubles as the installed ttnn version for ``platform.ttnn`` (both
     # come from ``resolve_version``, which probes the ttnn dist first). None => not resolvable.
     vllm_version: Optional[str] = None
+    # Installed Tenstorrent vLLM plugin version (vllm_tt_plugin), for ``runtime.plugin_version``.
+    # A distinct package from vLLM core. None => not resolvable (older/presence-only install).
+    vllm_plugin_version: Optional[str] = None
 
 
 def _tt_metal_home() -> Optional[str]:
@@ -185,18 +188,30 @@ def probe_build_key() -> Optional[int]:
     return None
 
 
-def _vllm_version() -> Optional[str]:
-    """Installed vLLM distribution version, or None. Never raises (metadata lookup is
+def _dist_version_any(dists: tuple) -> Optional[str]:
+    """First resolvable version among ``dists``, or None. Never raises (metadata lookup is
     best-effort — a missing/broken dist must not break a compatibility resolve)."""
     try:
         from importlib.metadata import PackageNotFoundError, version
 
-        try:
-            return version("vllm")
-        except PackageNotFoundError:
-            return None
+        for dist in dists:
+            try:
+                return version(dist)
+            except PackageNotFoundError:
+                continue
     except Exception:  # noqa: BLE001
         return None
+    return None
+
+
+def _vllm_version() -> Optional[str]:
+    """Installed vLLM core distribution version, or None."""
+    return _dist_version_any(("vllm",))
+
+
+def _vllm_plugin_version() -> Optional[str]:
+    """Installed Tenstorrent vLLM plugin version (vllm_tt_plugin), or None."""
+    return _dist_version_any(("vllm_tt_plugin", "vllm-tt-plugin"))
 
 
 def local_env(arch_override: Optional[str] = None, probe: bool = False) -> LocalEnv:
@@ -209,4 +224,5 @@ def local_env(arch_override: Optional[str] = None, probe: bool = False) -> Local
         harvesting_mask=dev.harvesting_mask,
         build_key=probe_build_key() if probe else None,
         vllm_version=_vllm_version(),
+        vllm_plugin_version=_vllm_plugin_version(),
     )

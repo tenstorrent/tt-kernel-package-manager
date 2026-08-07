@@ -11,7 +11,7 @@ import json
 import pytest
 from typer.testing import CliRunner
 
-from tt_kernel import bundles, cli, hub, localdb, metal, runtime, toolchain
+from tt_kernel import bundles, cli, hub, instances, localdb, metal, runtime, toolchain
 from tt_kernel.device import DeviceInfo
 from tt_kernel.manifest import (
     Capabilities,
@@ -201,8 +201,17 @@ def _fake_hub(monkeypatch, *, tt_metal="0.73.0", vllm="0.24.1"):
                         lambda arch_override=None: DeviceInfo(arch="blackhole", device_count=4, source="test"))
     monkeypatch.setattr(metal, "resolve_version", lambda: tt_metal)
     monkeypatch.setattr(metal, "_vllm_version", lambda: vllm)
+    monkeypatch.setattr(metal, "_vllm_plugin_version", lambda: None)
     # Silence the toolchain warning path (no real tt-metal/vLLM in the test env).
     monkeypatch.setattr(toolchain, "check_toolchain", lambda: toolchain.ToolchainReport(components=[]))
+    # Hermetic instance resolution: the active env is the only candidate (no real fs scan /
+    # ~/.config), and it reports the mocked versions. Mirrors a single-build box.
+    active = instances.Instance(name="active", python="/venv/bin/python", source="active")
+    monkeypatch.setattr(instances, "all_instances", lambda roots=None: [active])
+    monkeypatch.setattr(
+        instances, "probe_versions",
+        lambda inst, use_cache=True: instances.InstanceVersions(ttnn=tt_metal, vllm=vllm, plugin=None),
+    )
     return remotes  # {repo_id: published-folder Path}
 
 

@@ -193,14 +193,19 @@ def vllm_available() -> bool:
         return False
 
 
-def vllm_serve_env(bundles_dir: Path, launch_env: Optional[dict] = None) -> dict:
+def vllm_serve_env(bundles_dir: Path, launch_env: Optional[dict] = None,
+                   *, activation_env: Optional[dict] = None) -> dict:
     """The full environment for a vLLM serve subprocess.
 
-    Overlays ``EXTRA_MODELS_DIR`` (pointed at ``bundles_dir`` so the plugin discovers the
-    pulled model) and the bundle's per-machine launch env (``MESH_DEVICE``,
-    ``TT_*_VER``, ``VLLM_USE_V1``, weights-dir vars, …) onto the current environment.
+    Layering (later wins): the current process env, then the selected tt-metal instance's
+    ``activation_env`` (``TT_METAL_HOME`` / ``PYTHONPATH`` / ``LD_LIBRARY_PATH`` — so a stale
+    ambient ``TT_METAL_HOME`` is overridden to point at the pinned build), then
+    ``EXTRA_MODELS_DIR`` (so the plugin discovers the pulled model), then the bundle's
+    per-machine launch env (``MESH_DEVICE``, ``VLLM_USE_V1``, … — always authoritative last).
     """
     env = dict(os.environ)
+    if activation_env:
+        env.update({str(k): str(v) for k, v in activation_env.items()})
     env[ENV_EXTRA_MODELS_DIR] = str(bundles_dir)
     if launch_env:
         env.update({str(k): str(v) for k, v in launch_env.items()})
