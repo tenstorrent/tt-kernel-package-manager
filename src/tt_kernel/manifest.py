@@ -13,11 +13,19 @@ per-kernel hash in ``program_descriptors.cpp:126-141``.
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-SCHEMA_VERSION = "3"
+# Current authored schema. ``from_json`` also accepts the immediately prior version so a
+# v3 bundle already published to the Hub keeps installing unchanged (see SUPPORTED_SCHEMAS).
+SCHEMA_VERSION = "4"
+
+# Every schema version this tt-kernel can read. v4 is the unified "model + manifest" schema
+# (structured target/mesh/ranges/resources — vLLM only, kernels-less); v3 is the legacy
+# kernel-cache/dispatch schema, read-only supported. A bundle on any other version is refused
+# outright rather than silently half-read.
+SUPPORTED_SCHEMAS = frozenset({"3", "4"})
 
 
 class FileEntry(BaseModel):
@@ -114,11 +122,91 @@ class WeightsRef(BaseModel):
     repo, downloaded separately from the kernel bundle (skippable with ``--no-weights``).
     """
 
-    repo_id: str
+    # Aliased ``repo`` in JSON so a v4 manifest can write the natural ``"weights": {"repo": ...}``
+    # while the field stays ``repo_id`` everywhere in code.
+    repo_id: str = Field(alias="repo")
     revision: Optional[str] = None
     allow_patterns: Optional[List[str]] = None
     ignore_patterns: Optional[List[str]] = None
     repo_type: str = "model"
+
+    model_config = {"populate_by_name": True}
+
+
+class Platform(BaseModel):
+    """The platform (tt-metal/ttnn) envelope a v4 bundle runs on.
+
+    ``ttnn`` is a PEP 440 version specifier (e.g. ``">=0.72,<0.76"``) — a *range*, not the
+    exact pin the legacy kernel-cache path uses. When set, ``compare()`` gates on it (the
+    installed ttnn falling outside the range is forceable, not fatal) instead of the v3
+    exact-string ``tt_metal_version`` check. Kernels-less bundles JIT for the running
+    platform, so a range is the honest contract: the model advertises the envelope it
+    supports and the consumer resolves against what's installed.
+    """
+
+    ttnn: Optional[str] = None  # PEP 440 specifier, e.g. ">=0.72,<0.76"
+
+
+class Runtime(BaseModel):
+    """The serving runtime a v4 bundle needs.
+
+    ``kind`` selects the serving layer (only ``"vllm"`` today); ``version`` is a PEP 440
+    specifier for that runtime. An installed runtime outside the range is forceable.
+    """
+
+    kind: str = "vllm"
+    version: Optional[str] = None  # PEP 440 specifier, e.g. ">=0.24"
+
+
+class Mesh(BaseModel):
+    """Device topology the model was authored for.
+
+    Structured (rather than buried in an opaque launch command's env) so the launch renderer
+    can compose ``MESH_DEVICE``/fabric env and so search can reason about topology.
+    """
+
+    devices: int = 1
+    topology: Optional[str] = None  # e.g. "1x4"
+    fabric: Optional[str] = None  # e.g. "FABRIC_1D_RING"
+
+
+class Entrypoint(BaseModel):
+    """How the vLLM plugin loads the model.
+
+    Maps directly onto the plugin-owned ``vllm_metadata.json``: ``cls`` -> ``main_class``
+    (``"module:Class"``) and ``arch_name`` -> ``arch`` (the HF ``architectures`` name the
+    plugin registers under its ``TT`` prefix). Aliased as ``class`` in JSON (a Python keyword).
+    """
+
+    cls: str = Field(alias="class")
+    arch_name: str
+
+    model_config = {"populate_by_name": True}
+
+
+class Resources(BaseModel):
+    """Structured launch knobs the renderer turns into vLLM args.
+
+    Declarative-with-escape-hatch: the common knobs are structured so tt-kernel can validate
+    and search on them, while ``command_override`` / ``extra_args`` let an author bypass or
+    extend composition without waiting for a new field per vLLM flag.
+    """
+
+    max_model_len: Optional[int] = None
+    max_num_seqs: Optional[int] = None
+    block_size: Optional[int] = None
+    trace_region_bytes: Optional[int] = None
+    # Escape hatches (see docstring): raw args appended after the composed ones, or a full
+    # argv that replaces composition entirely (per machine key, or "default").
+    extra_args: List[str] = Field(default_factory=list)
+    command_override: Dict[str, List[str]] = Field(default_factory=dict)
+
+
+class Capabilities(BaseModel):
+    """Serving capabilities the model exposes (rendered into vLLM args + repo tags)."""
+
+    tool_parser: Optional[str] = None
+    reasoning_parser: Optional[str] = None
 
 
 class Manifest(BaseModel):
@@ -146,6 +234,30 @@ class Manifest(BaseModel):
     runner: Optional[RunnerPayload] = None
     weights: Optional[WeightsRef] = None
 
+    # --- v4 unified-manifest blocks (all optional; absent => a v3 bundle) -------------------
+    # These describe a kernels-less vLLM model in one authoritative document. tt-kernel renders
+    # the plugin-owned ``vllm_metadata.json`` from them at pull/serve; ``compare()`` gates on
+    # the ranges in ``platform``/``runtime``. A v3 bundle leaves them all None and behaves
+    # exactly as before.
+    platform: Optional[Platform] = None
+    runtime: Optional[Runtime] = None
+    target: Optional[str] = None  # searchable SKU name, e.g. "p150x4"
+    mesh: Optional[Mesh] = None
+    entrypoint: Optional[Entrypoint] = None
+    resources: Optional[Resources] = None
+    capabilities: Optional[Capabilities] = None
+    # Extension wheels shipped inside the bundle folder (adapter deps / custom parsers). The
+    # v4 analogue of ``RunnerPayload.wheels``; paths are relative to the bundle folder and are
+    # laid into EXTRA_MODELS_DIR alongside the adapter code on pull.
+    extensions: List[str] = Field(default_factory=list)
+    # Extra process env for serving, overlaid on the rendered launch env.
+    env: Dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def is_v4(self) -> bool:
+        """True for a unified vLLM manifest (has an entrypoint / platform block)."""
+        return self.entrypoint is not None or self.platform is not None
+
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)
 
@@ -153,16 +265,16 @@ class Manifest(BaseModel):
     def from_json(cls, text: str) -> "Manifest":
         """Parse and validate a manifest, rejecting any unsupported schema version.
 
-        tt-kernel is pre-release: there is exactly one supported schema. A bundle from a
-        different (older/newer) schema is refused outright rather than silently
-        half-read — re-publish it with a matching tt-kernel.
+        This tt-kernel reads every schema in ``SUPPORTED_SCHEMAS`` (currently v3 legacy
+        kernel-cache and v4 unified vLLM). A bundle on any other version is refused outright
+        rather than silently half-read — re-publish it with a matching tt-kernel.
         """
         m = cls.model_validate_json(text)
-        if m.schema_version != SCHEMA_VERSION:
+        if m.schema_version not in SUPPORTED_SCHEMAS:
+            supported = ", ".join(sorted(SUPPORTED_SCHEMAS))
             raise ValueError(
                 f"Unsupported bundle schema_version {m.schema_version!r}; this tt-kernel "
-                f"requires schema {SCHEMA_VERSION!r}. Re-publish the bundle with a current "
-                "tt-kernel."
+                f"reads schema(s) {supported}. Re-publish the bundle with a current tt-kernel."
             )
         return m
 
@@ -196,6 +308,41 @@ class CompatibilityReport(BaseModel):
         return bool(self.issues) and not self.has_fatal
 
 
+def _range_issues(manifest: Manifest, local: "LocalEnv") -> List[Incompatibility]:  # noqa: F821
+    """Forceable version-range issues for a v4 manifest's ``platform``/``runtime``.
+
+    Only emits when a range is declared AND the installed version is a real, parseable
+    version that falls outside it. An unresolvable installed version (None / bare git sha)
+    is treated as "assume OK" by ``version_satisfies`` (returns None) and produces no issue —
+    a dev checkout is never falsely blocked. Both issues are non-fatal (``--force``-able).
+    """
+    from .toolchain import version_satisfies
+
+    out: List[Incompatibility] = []
+    if manifest.platform and manifest.platform.ttnn:
+        # tt_metal_version doubles as the installed ttnn version (same source).
+        if version_satisfies(local.tt_metal_version, manifest.platform.ttnn) is False:
+            out.append(
+                Incompatibility(
+                    field="platform.ttnn",
+                    expected=manifest.platform.ttnn,
+                    detected=local.tt_metal_version or "unknown",
+                    fatal=False,
+                )
+            )
+    if manifest.runtime and manifest.runtime.version:
+        if version_satisfies(local.vllm_version, manifest.runtime.version) is False:
+            out.append(
+                Incompatibility(
+                    field=f"runtime.{manifest.runtime.kind}",
+                    expected=manifest.runtime.version,
+                    detected=local.vllm_version or "unknown",
+                    fatal=False,
+                )
+            )
+    return out
+
+
 def compare(manifest: Manifest, local: "LocalEnv") -> CompatibilityReport:  # noqa: F821
     """Compare a manifest against the detected local environment.
 
@@ -211,9 +358,12 @@ def compare(manifest: Manifest, local: "LocalEnv") -> CompatibilityReport:  # no
 
     A **kernels-less** bundle (``build_key is None``) ships no precompiled cache, so none
     of the cache-dependent gates apply: only ``arch`` (still fatal — the adapter/kernels
-    JIT for a specific ISA) and ``device_count`` are checked. ``tt_metal_version`` is left
-    to ``runner_version_advisory`` (a warning), because a kernels-less runner is reusable
-    and the vLLM path re-warms its own kernels.
+    JIT for a specific ISA) and ``device_count`` are checked. For a **v4** bundle the
+    ``platform.ttnn`` / ``runtime.version`` *ranges* are also checked here: an installed
+    version outside the declared range is forceable (non-fatal), mirroring the legacy
+    ``tt_metal_version`` block — the model advertises an envelope, the consumer resolves
+    against it, and ``--force`` overrides. A v3 kernels-less bundle carries no ranges, so its
+    version check stays with ``runner_version_advisory`` (a warning).
     """
     issues: List[Incompatibility] = []
     inp = manifest.build_key_inputs
@@ -224,7 +374,8 @@ def compare(manifest: Manifest, local: "LocalEnv") -> CompatibilityReport:  # no
         )
 
     if manifest.build_key is None:
-        # Kernels-less: skip every cache-dependent gate; only device_count is a warning.
+        # Kernels-less: skip every cache-dependent gate. v4 range gates + device_count only.
+        issues.extend(_range_issues(manifest, local))
         if local.device_count and manifest.device_count != local.device_count:
             issues.append(
                 Incompatibility(

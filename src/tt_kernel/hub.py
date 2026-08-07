@@ -115,15 +115,28 @@ def fetch_manifest(repo_id: str, revision: Optional[str]) -> Manifest:
     return Manifest.from_json(Path(path).read_text())
 
 
-def search(query: str, limit: int = 50, catalog_only: bool = False) -> List[dict]:
+def search(
+    query: str,
+    limit: int = 50,
+    catalog_only: bool = False,
+    tags: Optional[List[str]] = None,
+) -> List[dict]:
     """List tt-kernel cache repos matching a query, newest first.
 
     ``catalog_only`` restricts to repos opted into the community catalog (the same set the
-    web frontend shows) rather than every pushed cache bundle.
+    web frontend shows) rather than every pushed cache bundle. ``tags`` are additional repo
+    tags ANDed with the base tag — e.g. an ``arch`` (``blackhole``) or a v4 ``target``
+    (``p150x4``) written by ``push`` — so a consumer can ask "what runs on my box".
     """
     api = _api()
-    tag = TT_KERNEL_CATALOG_TAG if catalog_only else TT_KERNEL_TAG
-    results = api.list_models(filter=tag, search=query or None, limit=limit)
+    base = TT_KERNEL_CATALOG_TAG if catalog_only else TT_KERNEL_TAG
+    # list_models ANDs a list of filter tags; a lone string works too.
+    filter_tags = [base] + [t for t in (tags or []) if t]
+    results = api.list_models(
+        filter=filter_tags if len(filter_tags) > 1 else base,
+        search=query or None,
+        limit=limit,
+    )
     out: List[dict] = []
     for m in results:
         out.append(

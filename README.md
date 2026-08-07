@@ -64,14 +64,15 @@ tt-kernel doctor                                  # check tt-metal/tt-lang/vLLM 
 # vLLM (default) — serve a model through the Tenstorrent vLLM plugin
 tt-kernel serve you/mymodel                        # pull if needed, register, launch the OpenAI server
 tt-kernel serve you/mymodel --print                # print the launch command instead of running it
-tt-kernel push  you/mymodel --backend vllm \       # publish a vLLM bundle folder
-  --bundle-dir ./bundle --weights some-org/mymodel
+tt-kernel push  you/mymodel --backend vllm \       # publish a vLLM bundle from a v4 manifest
+  --manifest ./model.json --bundle-dir ./adapter   # (--bundle-dir optional for built-ins)
 
 # Shared / discovery
 tt-kernel pull  you/mymodel                        # download + install a bundle locally
 tt-kernel info  you/mymodel                        # manifest + compatibility verdict
 tt-kernel search gemma                             # discover published bundles
 tt-kernel search gemma --catalog                   # only bundles listed in the community catalog
+tt-kernel search --target p150x4 --arch blackhole  # "what runs on my box" (v4 tags)
 tt-kernel list                                     # locally installed bundles
 tt-kernel rm    you/mymodel                        # remove an installed bundle
 
@@ -105,9 +106,14 @@ no weights are shipped. See **[docs/authoring_runners.md](docs/authoring_runners
 metadata schema and the adapter contract.
 
 ```bash
+# v4 (recommended): author one manifest; tt-kernel renders vllm_metadata.json on pull
 tt-kernel push you/mymodel --private --backend vllm \
-  --bundle-dir ./bundle \                  # folder with vllm_metadata.json + adapter code
-  --weights some-org/mymodel               # HF weights the model loads at runtime
+  --manifest ./model.json \                # unified manifest (entrypoint/platform/runtime/…)
+  --bundle-dir ./adapter                    # optional: custom adapter class + extension wheels
+
+# legacy: ship a hand-written vllm_metadata.json verbatim
+tt-kernel push you/mymodel --private --backend vllm \
+  --bundle-dir ./bundle --weights some-org/mymodel
 
 tt-kernel pull you/mymodel                  # lay the folder into the local bundles dir
 tt-kernel pull you/mymodel --with-weights   # ...and also pre-download the weights (default: skip)
@@ -236,6 +242,13 @@ A cached binary is only valid when the consumer's environment matches the produc
 | `tt_metal_version` | package metadata → `git describe` | blocked (use `--force`) — per-kernel hashes won't match |
 | `build_key` inputs | tt-smi + env + flags | blocked (use `--force`) — names a different cache dir |
 | `device_count` | tt-smi | warning (use `--force`) |
+
+**v4 (vLLM) bundles use version *ranges*, not pins.** A v4 manifest declares
+`platform.ttnn` (e.g. `>=0.72,<0.76`) and `runtime.version` (e.g. vLLM `>=0.24`) as PEP 440
+specifiers. On `pull`, an installed version outside the range is a **forceable** block
+(`--force` overrides), never fatal; `arch` stays fatal; a bare git-sha checkout is treated as
+"assume OK". `tt-kernel doctor <id>` reports the required-vs-installed verdict declaratively —
+it never installs. See **[docs/authoring_runners.md](docs/authoring_runners.md)**.
 
 `build_key` (which names the on-disk cache subtree, `<cache_root>/<build_key>/`) is
 computed in C++ and not exposed to Python, so `pull` reconstructs its **inputs** —
