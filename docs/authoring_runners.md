@@ -239,6 +239,64 @@ re-pull is idempotent.
 `tt-metal/models/common/readiness_check/contract_vllm.py` and the canonical example
 `tt-metal/models/tt_transformers/tt/generator_vllm.py`.
 
+### The v4 unified manifest (`--manifest`, recommended)
+
+Write **one** manifest that declares everything the model needs, and `tt-kernel` **renders**
+the plugin-owned `vllm_metadata.json` from it on `pull` — you no longer hand-write two files.
+The manifest is a *partial*: you declare the model's requirements; `tt-kernel` fills the
+bookkeeping (producer, file index, arch/version detection) at push time.
+
+```jsonc
+// laguna.json — an authored v4 manifest
+{
+  "platform":     { "ttnn": ">=0.72,<0.76" },        // PEP 440 range, not an exact pin
+  "runtime":      { "kind": "vllm", "version": ">=0.24" },
+  "target":       "p150x4",                            // searchable machine SKU
+  "mesh":         { "devices": 4, "topology": "1x4", "fabric": "FABRIC_1D_RING" },
+  "entrypoint":   { "class": "ttlaguna.generator_vllm:LagunaForCausalLM",
+                    "arch_name": "LagunaForCausalLM" },  // -> main_class + arch
+  "weights":      { "repo": "poolside/Laguna-XS-2.1" },
+  "resources":    { "max_model_len": 131072, "max_num_seqs": 8, "block_size": 64,
+                    "trace_region_bytes": 1500000000 },
+  "capabilities": { "tool_parser": "poolside_v1", "reasoning_parser": "poolside_v1" },
+  "env":          { "MESH_DEVICE": "P150", "TT_LAGUNA_PIPE_CHUNK": "2048" }
+}
+```
+
+Push it (ship a `--bundle-dir` only if you have a custom adapter class / extension wheels —
+omit it when `entrypoint.class` is a tt-metal built-in):
+
+```bash
+tt-kernel push you/laguna --private --backend vllm \
+  --manifest ./laguna.json --bundle-dir ./adapter   # --bundle-dir optional for built-ins
+tt-kernel pull  you/laguna                            # renders vllm_metadata.json locally
+tt-kernel serve you/laguna                            # composes + launches the vLLM server
+```
+
+**How the launch command is composed.** `tt-kernel` turns `resources`/`capabilities`/`env`
+into the `server_example_tt.py` launch command (underscore flags: `--max_model_len`,
+`--max_num_seqs`, `--block_size`, `--trace_region_size`, `--tool_parser`, `--reasoning_parser`)
+with `VLLM_USE_V1=1` plus your `env` overlaid. When the mapping doesn't cover something, use
+the escape hatches under `resources`:
+
+- `"extra_args": ["--enable-prefix-caching"]` — appended to the composed command.
+- `"command_override": { "default": ["python3","my_server.py", ...],
+   "blackhole-4card": [...] }` — replaces composition entirely, per machine key.
+
+**How compatibility is resolved.** `platform.ttnn` and `runtime.version` are *ranges*.
+On `pull`, an installed version outside the range is a **forceable** block (`--force`
+overrides), never fatal — only an `arch` mismatch is fatal. A dev checkout whose version is a
+bare git sha is treated as "assume OK" and never falsely blocked. `tt-kernel doctor you/laguna`
+prints the required-vs-installed verdict (and how to get in range) without installing anything.
+
+**Discovery.** `push` tags the repo with its `arch` and `target`, so consumers can ask
+`tt-kernel search --target p150x4` / `--arch blackhole` for "what runs on my box".
+
+### Legacy: a hand-written `vllm_metadata.json` (`--bundle-dir` only)
+
+The older path — you author `vllm_metadata.json` yourself and `tt-kernel` ships it verbatim —
+is still supported for existing bundles. Prefer the v4 manifest above for anything new.
+
 A vLLM bundle is **kernels-less**: it ships no precompiled cache (vLLM JITs at first-run
 warmup into tt-metal's own local cache). It is a self-contained *folder*:
 

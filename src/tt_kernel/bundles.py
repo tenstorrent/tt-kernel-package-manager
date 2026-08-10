@@ -27,9 +27,12 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from . import device
+
+if TYPE_CHECKING:  # avoid import at runtime (manifest doesn't import bundles; keep it one-way)
+    from .manifest import Manifest
 
 ENV_BUNDLES_DIR = "TT_KERNEL_BUNDLES_DIR"
 ENV_MACHINE = "TT_KERNEL_MACHINE"
@@ -123,6 +126,102 @@ class VllmMetadata:
         return val if isinstance(val, dict) else {}
 
 
+# The serving entrypoint script inside the TT vLLM fork. The composed launch command invokes
+# it; matches the convention documented in docs/authoring_runners.md and asserted in tests.
+_VLLM_SERVER_SCRIPT = "server_example_tt.py"
+
+
+def _compose_launch_command(manifest: "Manifest", weights: Optional[str]) -> List[str]:
+    """Compose the vLLM launch argv from a v4 manifest's structured resources/capabilities.
+
+    Mirrors the ``server_example_tt.py --model ... --max_num_seqs N`` convention (underscore
+    flags) used throughout this repo. This is the ONLY place the opaque argv is synthesized;
+    anything this mapping doesn't cover is handled by the escape hatches:
+    ``resources.extra_args`` (appended) and ``resources.command_override`` (full replacement,
+    per machine key) — so an author is never blocked waiting for a new field per vLLM flag.
+    """
+    cmd: List[str] = ["python3", _VLLM_SERVER_SCRIPT]
+    if weights:
+        cmd += ["--model", weights]
+    res = manifest.resources
+    if res is not None:
+        if res.max_model_len is not None:
+            cmd += ["--max_model_len", str(res.max_model_len)]
+        if res.max_num_seqs is not None:
+            cmd += ["--max_num_seqs", str(res.max_num_seqs)]
+        if res.block_size is not None:
+            cmd += ["--block_size", str(res.block_size)]
+        if res.trace_region_bytes is not None:
+            cmd += ["--trace_region_size", str(res.trace_region_bytes)]
+    cap = manifest.capabilities
+    if cap is not None:
+        if cap.tool_parser:
+            cmd += ["--tool_parser", cap.tool_parser]
+        if cap.reasoning_parser:
+            cmd += ["--reasoning_parser", cap.reasoning_parser]
+    if res is not None and res.extra_args:
+        cmd += [str(a) for a in res.extra_args]
+    return cmd
+
+
+def _compose_launch_env(manifest: "Manifest") -> Dict[str, str]:
+    """Compose the serving env: the V1 engine default, then the manifest's ``env`` overlaid.
+
+    Topology-specific vars (``MESH_DEVICE`` etc.) are author-supplied via ``manifest.env`` —
+    tt-kernel does not invent device-mapping names it can't verify from ``mesh`` alone.
+    """
+    env: Dict[str, str] = {"VLLM_USE_V1": "1"}
+    env.update({k: str(v) for k, v in (manifest.env or {}).items()})
+    return env
+
+
+def render_vllm_metadata(manifest: "Manifest") -> dict:
+    """Render the plugin-owned ``vllm_metadata.json`` dict from a v4 unified manifest.
+
+    tt-kernel becomes the source of truth: rather than ship an author-written metadata file
+    verbatim, it *generates* the plugin schema from the one authoritative manifest —
+    ``entrypoint.arch_name`` -> ``arch``, ``entrypoint.cls`` -> ``main_class``,
+    ``weights.repo`` -> ``hf_weights``, and a ``launch`` map composed from
+    ``resources``/``capabilities``/``env`` (see ``_compose_launch_*``). A per-machine
+    ``command_override`` becomes its own launch entry; the composed command is always emitted
+    under ``default`` (unless overridden there). ``select_launch`` then picks the right entry
+    for the serving machine exactly as it does for a hand-written file.
+    """
+    ep = manifest.entrypoint
+    if ep is None:
+        raise ValueError("render_vllm_metadata requires a v4 manifest with an 'entrypoint'.")
+    weights = manifest.weights.repo_id if manifest.weights else None
+    base_cmd = _compose_launch_command(manifest, weights)
+    env = _compose_launch_env(manifest)
+
+    overrides: Dict[str, List[str]] = (
+        dict(manifest.resources.command_override) if manifest.resources else {}
+    )
+    launch: dict = {}
+    launch["default"] = {
+        "command": [str(a) for a in overrides.get("default", base_cmd)],
+        "env": env,
+    }
+    for key, argv in overrides.items():
+        if key == "default":
+            continue
+        launch[key] = {"command": [str(a) for a in argv], "env": env}
+
+    return {
+        "arch": ep.arch_name,
+        "main_class": ep.cls,
+        "hf_weights": weights,
+        "launch": launch,
+    }
+
+
+def write_vllm_metadata(bundle_folder: Path, metadata: dict) -> Path:
+    """Write a rendered ``vllm_metadata.json`` into an installed bundle folder."""
+    path = bundle_folder / VLLM_METADATA_NAME
+    path.write_text(json.dumps(metadata, indent=2))
+    return path
+
+
 def read_vllm_metadata(bundle_folder: Path) -> VllmMetadata:
     """Parse ``<bundle_folder>/vllm_metadata.json``. Raises FileNotFoundError/ValueError."""
     path = bundle_folder / VLLM_METADATA_NAME
@@ -186,6 +285,8 @@ __all__ = [
     "install_bundle",
     "remove_bundle",
     "read_vllm_metadata",
+    "render_vllm_metadata",
+    "write_vllm_metadata",
     "machine_candidates",
     "select_launch",
     "LaunchSpec",

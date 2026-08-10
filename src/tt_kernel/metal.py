@@ -46,6 +46,10 @@ class LocalEnv:
     device_count: int = 0
     harvesting_mask: Optional[int] = None
     build_key: Optional[int] = None  # only set via --probe
+    # Installed serving-runtime version (vLLM), for a v4 manifest's ``runtime.version`` range.
+    # ``tt_metal_version`` doubles as the installed ttnn version for ``platform.ttnn`` (both
+    # come from ``resolve_version``, which probes the ttnn dist first). None => not resolvable.
+    vllm_version: Optional[str] = None
 
 
 def _tt_metal_home() -> Optional[str]:
@@ -181,6 +185,20 @@ def probe_build_key() -> Optional[int]:
     return None
 
 
+def _vllm_version() -> Optional[str]:
+    """Installed vLLM distribution version, or None. Never raises (metadata lookup is
+    best-effort — a missing/broken dist must not break a compatibility resolve)."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return version("vllm")
+        except PackageNotFoundError:
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def local_env(arch_override: Optional[str] = None, probe: bool = False) -> LocalEnv:
     """Gather the full local environment for compatibility comparison."""
     dev = detect_device(arch_override=arch_override)
@@ -190,4 +208,5 @@ def local_env(arch_override: Optional[str] = None, probe: bool = False) -> Local
         device_count=dev.device_count,
         harvesting_mask=dev.harvesting_mask,
         build_key=probe_build_key() if probe else None,
+        vllm_version=_vllm_version(),
     )
