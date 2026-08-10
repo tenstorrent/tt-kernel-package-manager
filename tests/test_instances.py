@@ -283,3 +283,158 @@ def test_v3_bundle_no_selection(monkeypatch, tmp_path):
     assert pull.exit_code == 0, pull.output
     assert called["n"] == 0  # no instance selection for a range-less bundle
     assert localdb.get("acme/legacy")["instance_name"] is None
+
+
+# =====================================================================================
+# Review #11 (jzhengTT) regression tests
+# =====================================================================================
+
+# --- G1: version_satisfies must not crash on a None/absent range -----------------------
+def test_version_satisfies_none_spec_is_none():
+    # A real installed version with an undeclared (None) range must return None, not raise.
+    assert toolchain.version_satisfies("0.72.0", None) is None
+    assert toolchain.version_satisfies("0.72.0", "") is None
+
+
+def test_select_with_partial_ranges_does_not_crash(monkeypatch):
+    # A v4 manifest declaring only platform.ttnn (vllm/plugin None) must still select.
+    _insts(monkeypatch, {"m": ("/p", "0.73.0", "0.24.0", "0.3.0")})
+    res = instances.select(ttnn=">=0.72", vllm=None, plugin=None)
+    assert res.chosen is not None and res.chosen.name == "m"
+
+
+# --- G2: the pin must apply to the common launch-command forms -------------------------
+@pytest.mark.parametrize("first,replaced", [
+    ("python", True), ("python3", True), ("python3.10", True),
+    ("/opt/tt/build/python_env/bin/python", True),
+    ("vllm", False), ("bash", False),
+])
+def test_vllm_serve_argv_pins_python_forms(first, replaced):
+    argv = runtime.vllm_serve_argv([first, "server_example_tt.py"], python="/pin/python")
+    assert (argv[0] == "/pin/python") is replaced
+    assert runtime.is_python_command(first) is replaced
+
+
+# --- G10: activation env derives all three pin vars, prepended not clobbered -----------
+def test_activation_env_derives_pythonpath_and_ld_library_path():
+    inst = Instance(name="s", python="/p", tt_metal_home="/opt/tt-0.75", source="scan")
+    env = inst.activation_env()
+    assert env["TT_METAL_HOME"] == "/opt/tt-0.75"
+    assert env["PYTHONPATH"] == "/opt/tt-0.75"
+    assert env["LD_LIBRARY_PATH"] == "/opt/tt-0.75/build/lib"
+
+
+def test_vllm_serve_env_prepends_path_vars(monkeypatch):
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/usr/lib")
+    monkeypatch.setenv("PYTHONPATH", "/existing")
+    act = {"TT_METAL_HOME": "/opt/tt", "LD_LIBRARY_PATH": "/opt/tt/build/lib", "PYTHONPATH": "/opt/tt"}
+    env = runtime.vllm_serve_env("/bundles", {}, activation_env=act)
+    assert env["LD_LIBRARY_PATH"] == "/opt/tt/build/lib:/usr/lib"   # prepended, system kept
+    assert env["PYTHONPATH"] == "/opt/tt:/existing"
+    assert env["TT_METAL_HOME"] == "/opt/tt"                        # plain override
+
+
+# --- G4: an unreadable scan root must be skipped, not crash the command ----------------
+def test_scan_skips_unreadable_root(monkeypatch, tmp_path):
+    from pathlib import Path
+    bad = tmp_path / "denied"
+    bad.mkdir()
+    orig = Path.iterdir
+
+    def fake_iterdir(self):
+        if str(self) == str(bad):
+            raise PermissionError("nope")
+        return orig(self)
+
+    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
+    # Must return cleanly (empty), not raise.
+    assert instances.scan_checkouts([str(bad)]) == []
+
+
+# --- G5 + G7: cache is keyed on (python, tt_metal_home)+mtime and skips failed probes ---
+def _fake_probe_run(monkeypatch, by_home):
+    """subprocess.run stub: emit versions chosen by the env's TT_METAL_HOME."""
+    class _P:
+        def __init__(self, out): self.stdout = out; self.returncode = 0
+    def run(args, capture_output=True, text=True, timeout=None, env=None, check=True):
+        home = (env or {}).get("TT_METAL_HOME")
+        if home not in by_home:
+            raise FileNotFoundError("boom")
+        return _P(by_home[home])
+    monkeypatch.setattr(instances.subprocess, "run", run)
+
+
+def test_probe_cache_keyed_on_home_not_just_python(monkeypatch):
+    # Two instances share one interpreter but differ in TT_METAL_HOME -> distinct versions.
+    _fake_probe_run(monkeypatch, {
+        "/opt/tt-0.72": "0.72.0|0.24.0|0.3.0",
+        "/opt/tt-0.76": "0.76.0|0.25.0|0.3.9",
+    })
+    a = Instance(name="a", python="/usr/bin/python3", tt_metal_home="/opt/tt-0.72", source="registry")
+    b = Instance(name="b", python="/usr/bin/python3", tt_metal_home="/opt/tt-0.76", source="registry")
+    assert instances._cache_key(a) != instances._cache_key(b)
+    assert instances.probe_versions(a).ttnn == "0.72.0"
+    assert instances.probe_versions(b).ttnn == "0.76.0"   # not the cached 0.72 from `a`
+
+
+def test_failed_probe_not_cached(monkeypatch):
+    _fake_probe_run(monkeypatch, {})  # every probe raises
+    inst = Instance(name="x", python="/usr/bin/python3", source="registry")
+    assert instances.probe_versions(inst).ttnn is None
+    # Nothing cached, so a later successful probe isn't masked by a stale None.
+    assert instances._load().get("version_cache", {}) == {}
+
+
+# --- G9: a corrupt registry is surfaced + moved aside, not silently erased -------------
+def test_corrupt_registry_moved_aside(monkeypatch):
+    instances.add_instance("keep", "/p/python")           # a real entry exists
+    path = instances._registry_path()
+    path.write_text("{ this is not json")                 # corrupt it
+    assert instances._load() == {}                         # reads empty…
+    assert path.with_suffix(".json.corrupt").is_file()     # …but the bad file is preserved
+    # A subsequent add starts fresh (doesn't resurrect the corrupt content) and persists.
+    instances.add_instance("new", "/p2/python")
+    assert {i.name for i in instances.registry_instances()} == {"new"}
+
+
+# --- G8: `instances list --for` drops the compat column on a fetch failure -------------
+def test_instances_list_fetch_failure_skips_compat(monkeypatch):
+    monkeypatch.setattr(instances, "all_instances",
+                        lambda roots=None: [Instance(name="a", python="/p", source="registry")])
+    monkeypatch.setattr(instances, "probe_versions",
+                        lambda inst, use_cache=True: InstanceVersions("0.73.0", "0.24.0", "0.3.0"))
+    monkeypatch.setattr(instances, "scan_checkouts", lambda roots=None: [])
+
+    def boom(*a, **k):
+        raise RuntimeError("network down")
+    monkeypatch.setattr(hub, "fetch_manifest", boom)
+    res = runner.invoke(cli.app, ["instances", "list", "--for", "acme/x"])
+    assert res.exit_code == 0, res.output
+    assert "skipping compatibility" in res.output
+    assert "✓" not in res.output and "✗" not in res.output   # no false compatibility marks
+
+
+# --- G6: a None probe result must not blank out the real installed version -------------
+def test_none_probe_does_not_nullify_gate(monkeypatch, tmp_path):
+    """Selected instance reports ttnn (in range) but vLLM=None; the local vLLM (out of range)
+    must still gate — a failed vLLM probe can't silently turn the check into a no-op."""
+    monkeypatch.setenv(bundles.ENV_BUNDLES_DIR, str(tmp_path / "bundles"))
+    _fake_hub(monkeypatch, tmp_path)
+    monkeypatch.setattr(metal, "resolve_version", lambda: "0.73.0")
+    monkeypatch.setattr(metal, "_vllm_version", lambda: "0.20.0")      # ambient vLLM out of range
+    monkeypatch.setattr(metal, "_vllm_plugin_version", lambda: None)
+    sel = Instance(name="sel", python="/p", tt_metal_home="/opt/tt", source="registry")
+    monkeypatch.setattr(instances, "all_instances", lambda roots=None: [sel])
+    monkeypatch.setattr(instances, "select",
+                        lambda **k: instances.SelectionResult(
+                            chosen=sel,
+                            candidates=[instances.Candidate(sel, InstanceVersions("0.73.0", None, None), True)],
+                            reason="sel"))
+    monkeypatch.setattr(instances, "probe_versions",
+                        lambda inst, use_cache=True: InstanceVersions("0.73.0", None, None))
+    mp = _v4_manifest_file(tmp_path)  # runtime.version ">=0.24"
+    assert runner.invoke(cli.app, ["push", "acme/g6", "--private", "--backend", "vllm",
+                                   "--manifest", str(mp)]).exit_code == 0
+    # vLLM 0.20 < 0.24 must block (probe None fell back to the real ambient 0.20), needs --force.
+    blocked = runner.invoke(cli.app, ["pull", "acme/g6", "--arch", "blackhole"])
+    assert blocked.exit_code == 1 and "--force" in blocked.output

@@ -33,6 +33,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -63,10 +64,24 @@ class Instance:
         return self.source == "active"
 
     def activation_env(self) -> Dict[str, str]:
-        """The extra env this instance layers on top of the process environment."""
-        out = dict(self.env)
+        """The extra env this instance layers on top of the process environment.
+
+        From ``tt_metal_home`` we derive the full activation a tt-metal source build needs —
+        ``TT_METAL_HOME``, ``PYTHONPATH`` (the checkout root), and ``LD_LIBRARY_PATH``
+        (``build/lib``, where ``libtt_metal.so`` lives). Without the last two, serving a
+        *scanned* checkout (whose ``env`` is empty) would inherit the shell's ambient
+        ``LD_LIBRARY_PATH`` from a different build and load the wrong ``.so`` at import. These
+        derived values are marked for **prepend** at launch (``vllm_serve_env``) so they add to,
+        rather than clobber, any inherited path. An explicit ``env`` entry always wins.
+        """
+        out: Dict[str, str] = {}
         if self.tt_metal_home:
-            out.setdefault("TT_METAL_HOME", self.tt_metal_home)
+            home = self.tt_metal_home
+            out["TT_METAL_HOME"] = home
+            # Prepend markers (see PREPEND_VARS / vllm_serve_env).
+            out["PYTHONPATH"] = home
+            out["LD_LIBRARY_PATH"] = os.path.join(home, "build", "lib")
+        out.update(self.env)  # explicit registry env overrides the derived defaults
         return out
 
     def to_entry(self) -> dict:
@@ -118,14 +133,41 @@ def _load() -> dict:
     try:
         data = json.loads(path.read_text())
         return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
+    except json.JSONDecodeError:
+        # A corrupt registry is surfaced (not silently treated as empty), because the next
+        # write would otherwise erase every registered instance. We move it aside so a stray
+        # ``instances add`` can't clobber it, and continue from empty.
+        try:
+            backup = path.with_suffix(".json.corrupt")
+            path.replace(backup)
+            sys.stderr.write(f"tt-kernel: registry {path} was corrupt; moved to {backup}\n")
+        except OSError:
+            pass
+        return {}
+    except OSError:
         return {}
 
 
 def _save(data: dict) -> None:
+    """Atomically persist the registry (tempfile + os.replace).
+
+    A plain ``write_text`` truncates then writes, so a Ctrl-C mid-write leaves a corrupt file
+    (which ``_load`` would then read as empty, and the next write would make permanent). The
+    atomic replace guarantees readers only ever see the old or the new whole file.
+    """
     path = _registry_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2))
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".instances-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(json.dumps(data, indent=2))
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def default_scan_roots() -> List[str]:
@@ -200,7 +242,15 @@ def scan_checkouts(roots: Optional[List[str]] = None) -> List[Tuple[str, Optiona
     seen: set = set()
     for root in roots:
         rp = Path(root).expanduser()
-        candidates = [rp] + (list(rp.iterdir()) if rp.is_dir() else [])
+        # Default roots include $HOME and /opt, which aren't guaranteed listable on a shared
+        # or hardened host — an unreadable root must be skipped, not crash `pull`/`serve`
+        # (which reach scan via the main path) with a PermissionError.
+        candidates = [rp]
+        if rp.is_dir():
+            try:
+                candidates += list(rp.iterdir())
+            except OSError:
+                continue
         for c in candidates:
             try:
                 if not c.is_dir() or c.joinpath(*_CHECKOUT_MARKER).is_dir() is False:
@@ -277,21 +327,41 @@ _PROBE_SRC = (
 )
 
 
+def _cache_key(inst: Instance) -> str:
+    """Cache key for an instance's probed versions.
+
+    Keyed on the SAME identity ``all_instances`` dedupes on — ``(realpath(python),
+    tt_metal_home)`` — so two registry entries sharing one interpreter but differing in
+    ``TT_METAL_HOME`` don't collide on a single slot (and get each other's versions). The
+    interpreter's mtime is folded in too, so rebuilding a checkout in place busts the cache
+    instead of serving a stale ttnn version forever.
+    """
+    try:
+        rp = os.path.realpath(inst.python)
+    except OSError:
+        rp = inst.python
+    try:
+        mtime = str(int(os.path.getmtime(rp)))
+    except OSError:
+        mtime = "0"
+    return f"{rp}::{inst.tt_metal_home or ''}::{mtime}"
+
+
 def probe_versions(inst: Instance, *, use_cache: bool = True) -> InstanceVersions:
     """Resolve an instance's ttnn / vLLM / plugin versions.
 
     The active instance resolves in-process (cheap). Any other instance is probed
     **out-of-process** under its activation env; ttnn falls back to ``git describe`` in
-    ``tt_metal_home`` (mirroring :func:`metal.resolve_version`). Results are cached by
-    interpreter path in the registry file's ``version_cache`` (``use_cache=False`` refreshes).
-    Never raises — an unresolved version is ``None`` and treated as "assume OK" downstream.
+    ``tt_metal_home`` (mirroring :func:`metal.resolve_version`). Results are cached (keyed by
+    :func:`_cache_key`) in the registry file's ``version_cache`` (``use_cache=False``
+    refreshes). Never raises — an unresolved version is ``None`` and treated as "assume OK".
     """
     if inst.is_active:
         return InstanceVersions(ttnn=metal.resolve_version(),
                                 vllm=metal._vllm_version(),
                                 plugin=metal._vllm_plugin_version())
 
-    key = os.path.realpath(inst.python) if inst.python else inst.name
+    key = _cache_key(inst)
     if use_cache:
         cached = _load().get("version_cache", {}).get(key)
         if isinstance(cached, dict):
@@ -299,6 +369,7 @@ def probe_versions(inst: Instance, *, use_cache: bool = True) -> InstanceVersion
                                     plugin=cached.get("plugin"))
 
     versions = InstanceVersions()
+    probe_ok = False
     env = {**os.environ, **inst.activation_env()}
     try:
         out = subprocess.run([inst.python, "-c", _PROBE_SRC], capture_output=True, text=True,
@@ -306,15 +377,19 @@ def probe_versions(inst: Instance, *, use_cache: bool = True) -> InstanceVersion
         parts = (out.stdout.strip().split("|") + ["", "", ""])[:3]
         versions = InstanceVersions(ttnn=parts[0] or None, vllm=parts[1] or None,
                                     plugin=parts[2] or None)
+        probe_ok = True
     except (subprocess.SubprocessError, OSError):
-        pass
+        pass  # missing .so / timeout / bad interpreter — treated as "unknown", not cached
     if versions.ttnn is None and inst.tt_metal_home:
         versions.ttnn = _git_describe(inst.tt_metal_home)
 
-    data = _load()
-    cache = data.setdefault("version_cache", {})
-    cache[key] = {"ttnn": versions.ttnn, "vllm": versions.vllm, "plugin": versions.plugin}
-    _save(data)
+    # Only cache a result we actually resolved. Caching an all-None from a probe that merely
+    # timed out would permanently mark the instance "unknown = assume OK".
+    if probe_ok or any((versions.ttnn, versions.vllm, versions.plugin)):
+        data = _load()
+        data.setdefault("version_cache", {})[key] = {
+            "ttnn": versions.ttnn, "vllm": versions.vllm, "plugin": versions.plugin}
+        _save(data)
     return versions
 
 

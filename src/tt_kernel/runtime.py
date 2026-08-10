@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -178,12 +179,26 @@ def serve_command(runner_spec: str, weights_path: Path) -> str:
 
 
 # --------------------------------------------------------------------------- vLLM
-def vllm_available() -> bool:
-    """Whether the Tenstorrent vLLM serving stack (vLLM + the plugin) is importable here.
+def vllm_available(python: Optional[str] = None) -> bool:
+    """Whether the Tenstorrent vLLM serving stack (vLLM + the plugin) is importable.
 
-    DETECTION only (``find_spec``) — never imports vLLM. Both the fork and the plugin must
-    be present for the serve handoff to work.
+    DETECTION only (``find_spec``) — never imports vLLM. Both the fork and the plugin must be
+    present for the serve handoff to work. With ``python`` set (a selected tt-metal instance's
+    interpreter, which may be a different venv than the one running tt-kernel), the check
+    shells out to that interpreter — otherwise a pipx-installed tt-kernel would report the
+    stack missing even though the *pinned* build can serve.
     """
+    if python is not None and python != sys.executable:
+        try:
+            proc = subprocess.run(
+                [python, "-c", "import importlib.util as u,sys;"
+                 f"sys.exit(0 if u.find_spec('{_VLLM_PKG}') and "
+                 f"u.find_spec('{_VLLM_PLUGIN_PKG}') else 1)"],
+                timeout=30,
+            )
+            return proc.returncode == 0
+        except (subprocess.SubprocessError, OSError):
+            return False
     try:
         return (
             importlib.util.find_spec(_VLLM_PKG) is not None
@@ -205,22 +220,48 @@ def vllm_serve_env(bundles_dir: Path, launch_env: Optional[dict] = None,
     """
     env = dict(os.environ)
     if activation_env:
-        env.update({str(k): str(v) for k, v in activation_env.items()})
+        for k, v in activation_env.items():
+            k, v = str(k), str(v)
+            # Path-list vars from a pinned build must ADD to, not replace, the inherited value
+            # (dropping the system LD_LIBRARY_PATH can break the loader); everything else
+            # (TT_METAL_HOME, MESH_DEVICE, …) is an authoritative override.
+            if k in _PREPEND_ENV and env.get(k) and v not in env[k].split(os.pathsep):
+                env[k] = v + os.pathsep + env[k]
+            else:
+                env[k] = v
     env[ENV_EXTRA_MODELS_DIR] = str(bundles_dir)
     if launch_env:
         env.update({str(k): str(v) for k, v in launch_env.items()})
     return env
 
 
+# Env vars that are colon-separated path lists — a pinned instance prepends to them.
+_PREPEND_ENV = ("PYTHONPATH", "LD_LIBRARY_PATH")
+
+
+def is_python_command(token: str) -> bool:
+    """True if ``token`` is a Python interpreter invocation the pin can safely replace.
+
+    Matches ``python``, ``python3``, ``python3.10``, and absolute/relative paths whose
+    basename is one of those (``/opt/tt/build/python_env/bin/python``). Does NOT match
+    ``vllm``, ``bash``, etc. — replacing those with an interpreter would be wrong, so the
+    caller warns instead of silently mis-pinning.
+    """
+    return bool(re.match(r"^python[0-9.]*$", os.path.basename(str(token))))
+
+
 def vllm_serve_argv(launch_command: List[str], *, python: Optional[str] = None) -> List[str]:
     """The argv to launch the vLLM OpenAI server, from a bundle's per-machine command.
 
     The bundle's ``launch.command`` is authoritative (e.g. ``["python3",
-    "server_example_tt.py", "--model", ...]``). ``python`` optionally overrides the
-    interpreter when the command's first token is a bare ``python``/``python3``.
+    "server_example_tt.py", "--model", ...]``). When ``python`` (a pinned instance's
+    interpreter) is given, it replaces the command's first token whenever that token *is* a
+    Python interpreter — bare, versioned, or an absolute path (see ``is_python_command``) — so
+    the pin isn't silently dropped for the common ``python3.10`` / abs-path forms. A non-Python
+    launcher (``vllm``, ``bash``) can't be substituted; the caller detects that and warns.
     """
     argv = [str(c) for c in launch_command]
-    if python and argv and argv[0] in ("python", "python3"):
+    if python and argv and is_python_command(argv[0]):
         argv[0] = python
     return argv
 

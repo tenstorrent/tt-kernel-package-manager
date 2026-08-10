@@ -116,8 +116,13 @@ def version_satisfies(installed: Optional[str], spec: str) -> Optional[bool]:
     ``spec`` also yields ``None`` rather than raising, so a bad manifest can't hard-crash a
     resolve. Uses ``packaging`` for correct range semantics — upper bounds AND pre-releases
     (``0.72.3rc1`` compares as a real point release, not truncated to ``0.72``).
+
+    A falsy ``spec`` (``None``/empty) also returns ``None``: callers routinely resolve a
+    manifest that declares only some of the ttnn/vLLM/plugin ranges, and an undeclared range
+    is "no constraint", not a crash. (``SpecifierSet(None)`` raises ``TypeError``, which this
+    guard prevents.)
     """
-    if not installed:
+    if not installed or not spec:
         return None
     from packaging.specifiers import InvalidSpecifier, SpecifierSet
 

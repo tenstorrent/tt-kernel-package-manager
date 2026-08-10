@@ -810,9 +810,12 @@ def _select_instance(manifest, *, arch, instance_override, force):
         typer.secho(f"  tt-metal instance: {chosen.name} "
                     f"(ttnn={v.ttnn}, vllm={v.vllm}, plugin={v.plugin})", fg=typer.colors.CYAN)
 
+    # A probe that fails (missing .so, NFS timeout — all swallowed) yields None; do NOT let it
+    # clobber the really-installed version, or the range gate silently becomes a no-op and an
+    # incompatible bundle installs clean. Fall back to the detected local value.
     base.tt_metal_version = v.ttnn or base.tt_metal_version
-    base.vllm_version = v.vllm
-    base.vllm_plugin_version = v.plugin
+    base.vllm_version = v.vllm or base.vllm_version
+    base.vllm_plugin_version = v.plugin or base.vllm_plugin_version
     return chosen, base
 
 
@@ -921,12 +924,17 @@ def instances_list(
 ) -> None:
     """List the tt-metal instances discovered on this host (active + registry + scan)."""
     ranges = (None, None, None)
+    show_compat = False  # only mark ✓/✗ when we actually retrieved the bundle's requirements
     if for_repo:
         try:
             m = hub.fetch_manifest(*_split_revision(for_repo))
             ranges = _manifest_ranges(m)
+            show_compat = True
         except Exception as exc:  # noqa: BLE001
-            typer.secho(f"  ! could not fetch {for_repo}: {exc}", fg=typer.colors.YELLOW)
+            # Don't fall through and green-check every row against empty requirements we never
+            # fetched — just list the instances and say the comparison is unavailable.
+            typer.secho(f"  ! could not fetch {for_repo}: {exc} (skipping compatibility column)",
+                        fg=typer.colors.YELLOW)
     insts = instances.all_instances()
     if not insts:
         typer.echo("No tt-metal instances found.")
@@ -936,7 +944,7 @@ def instances_list(
         line = (f"[{inst.source}] {inst.name}: ttnn={v.ttnn or '—'} vllm={v.vllm or '—'} "
                 f"plugin={v.plugin or '—'}  ({inst.python})")
         color = None
-        if for_repo:
+        if show_compat:
             ok = (toolchain.version_satisfies(v.ttnn, ranges[0]) is not False
                   and toolchain.version_satisfies(v.vllm, ranges[1]) is not False
                   and toolchain.version_satisfies(v.plugin, ranges[2]) is not False)
@@ -1242,6 +1250,17 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
     env = runtime.vllm_serve_env(extra_models_dir, launch.env, activation_env=activation_env)
     endpoint = _endpoint_from_command(launch.command)
 
+    # If a pin was requested but the launch command's first token isn't a Python interpreter,
+    # the interpreter can't be substituted — the process would run under the ambient one while
+    # this build's env is exported. Warn loudly rather than silently mis-pin (see review G2).
+    if inst_python and launch.command and not runtime.is_python_command(launch.command[0]):
+        typer.secho(
+            f"  ! instance {inst_label} was selected, but the bundle's launch command starts "
+            f"with {launch.command[0]!r} (not a Python interpreter), so the pinned interpreter "
+            "could not be applied — the server may run under the wrong tt-metal build.",
+            fg=typer.colors.YELLOW,
+        )
+
     via = f"{mkey}" + (f"; instance={inst_label}" if inst_label else "")
     typer.secho(f"[vLLM: {md.arch} via {via}; EXTRA_MODELS_DIR={extra_models_dir}]",
                 fg=typer.colors.CYAN)
@@ -1252,10 +1271,13 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
                             **launch.env}.items())
         typer.echo(f"{exports} " + " ".join(argv))
         return
-    if not runtime.vllm_available():
+    # Check the interpreter that will actually run (the pinned instance's, if any) — not the
+    # manager's, which may be a pipx venv with no vLLM (review G3).
+    if not runtime.vllm_available(python=inst_python):
+        where = f"the pinned instance ({inst_python})" if inst_python else "this environment"
         raise _err(
-            "Cannot serve: the Tenstorrent vLLM stack (vllm + vllm_tt_plugin) is not importable "
-            "here. Install it (see scripts/install.sh), or use --print to emit the command."
+            f"Cannot serve: the Tenstorrent vLLM stack (vllm + vllm_tt_plugin) is not importable "
+            f"in {where}. Install it (see scripts/install.sh), or use --print to emit the command."
         )
     try:
         raise typer.Exit(code=subprocess.run(argv, env=env).returncode)
