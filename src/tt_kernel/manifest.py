@@ -150,12 +150,17 @@ class Platform(BaseModel):
 class Runtime(BaseModel):
     """The serving runtime a v4 bundle needs.
 
-    ``kind`` selects the serving layer (only ``"vllm"`` today); ``version`` is a PEP 440
-    specifier for that runtime. An installed runtime outside the range is forceable.
+    ``kind`` selects the serving layer (only ``"vllm"`` today). ``version`` is a PEP 440
+    specifier for the runtime core (vLLM); ``plugin_version`` is a separate specifier for the
+    Tenstorrent vLLM *plugin* (``vllm_tt_plugin``) — a distinct package from vLLM core that
+    the fork ships alongside it. Either range being unsatisfied by what's installed is
+    forceable (non-fatal). Omitting ``plugin_version`` keeps the legacy presence-only plugin
+    check (the fork tracks ``dev`` with no version floor).
     """
 
     kind: str = "vllm"
-    version: Optional[str] = None  # PEP 440 specifier, e.g. ">=0.24"
+    version: Optional[str] = None  # PEP 440 specifier for vLLM core, e.g. ">=0.24"
+    plugin_version: Optional[str] = None  # PEP 440 specifier for vllm_tt_plugin, e.g. ">=0.3,<0.4"
 
 
 class Mesh(BaseModel):
@@ -333,6 +338,16 @@ def _range_issues(manifest: Manifest, local: "LocalEnv") -> List[Incompatibility
                     field=f"runtime.{manifest.runtime.kind}",
                     expected=manifest.runtime.version,
                     detected=local.vllm_version or "unknown",
+                    fatal=False,
+                )
+            )
+    if manifest.runtime and manifest.runtime.plugin_version:
+        if version_satisfies(local.vllm_plugin_version, manifest.runtime.plugin_version) is False:
+            out.append(
+                Incompatibility(
+                    field=f"runtime.{manifest.runtime.kind}-plugin",
+                    expected=manifest.runtime.plugin_version,
+                    detected=local.vllm_plugin_version or "unknown",
                     fatal=False,
                 )
             )

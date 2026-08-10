@@ -76,6 +76,11 @@ tt-kernel search --target p150x4 --arch blackhole  # "what runs on my box" (v4 t
 tt-kernel list                                     # locally installed bundles
 tt-kernel rm    you/mymodel                        # remove an installed bundle
 
+# tt-metal instances (which build serves a v4 model)
+tt-kernel instances list --for you/mymodel         # installed builds + which satisfy the model
+tt-kernel instances add --name metal-0.73 \        # register a build auto-scan can't find
+  --python /opt/tt/0.73/venv/bin/python --tt-metal-home /opt/tt/0.73
+
 # Kernel-cache (legacy dispatch path) — see below
 tt-kernel run   you/smallmodel-blackholex1         # dispatch runtime + precompiled cache
 tt-kernel clean --all                              # wipe cache subtrees for a clean producer state
@@ -244,11 +249,19 @@ A cached binary is only valid when the consumer's environment matches the produc
 | `device_count` | tt-smi | warning (use `--force`) |
 
 **v4 (vLLM) bundles use version *ranges*, not pins.** A v4 manifest declares
-`platform.ttnn` (e.g. `>=0.72,<0.76`) and `runtime.version` (e.g. vLLM `>=0.24`) as PEP 440
-specifiers. On `pull`, an installed version outside the range is a **forceable** block
-(`--force` overrides), never fatal; `arch` stays fatal; a bare git-sha checkout is treated as
-"assume OK". `tt-kernel doctor <id>` reports the required-vs-installed verdict declaratively —
-it never installs. See **[docs/authoring_runners.md](docs/authoring_runners.md)**.
+`platform.ttnn` (e.g. `>=0.72,<0.76`), `runtime.version` (vLLM core, e.g. `>=0.24`), and
+`runtime.plugin_version` (the `vllm_tt_plugin` package) as PEP 440 specifiers. On `pull`, an
+installed version outside a range is a **forceable** block (`--force` overrides), never fatal;
+`arch` stays fatal; a bare git-sha checkout is treated as "assume OK". `tt-kernel doctor <id>`
+reports the required-vs-installed verdict declaratively — it never installs.
+
+**Multiple tt-metal builds → the instance registry.** When several tt-metal builds are on a
+host, `pull` selects the **newest installed instance that satisfies the manifest's ranges** and
+pins its activation (interpreter + `TT_METAL_HOME`/`PYTHONPATH`/`LD_LIBRARY_PATH`); `serve`
+launches under that exact build. Instances come from the active interpreter, a manager-owned
+registry (`~/.config/tt-kernel/instances.json`), and an auto-scan — manage them with
+`tt-kernel instances list|add|remove|scan` and override per-command with `--instance`. See
+**[docs/authoring_runners.md](docs/authoring_runners.md)**.
 
 `build_key` (which names the on-disk cache subtree, `<cache_root>/<build_key>/`) is
 computed in C++ and not exposed to Python, so `pull` reconstructs its **inputs** —

@@ -19,7 +19,10 @@ from typing import List, Optional
 import typer
 
 from . import MANIFEST_NAME, TT_KERNEL_CATALOG_TAG, TT_KERNEL_TAG, __version__
-from . import auth, bundles, cache, device, hub, localdb, metal, resolve as resolve_mod, runtime, toolchain
+from . import (
+    auth, bundles, cache, device, hub, instances, localdb, metal,
+    resolve as resolve_mod, runtime, toolchain,
+)
 from .manifest import (
     CompatibilityReport,
     FileEntry,
@@ -37,6 +40,15 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+# Sub-app for the tt-metal instance registry (the supply side of version resolution).
+instances_app = typer.Typer(
+    name="instances",
+    help="Discover, register, and inspect the tt-metal builds on this host.",
+    no_args_is_help=True,
+    add_completion=False,
+)
+app.add_typer(instances_app)
 
 
 def _err(msg: str) -> "typer.Exit":
@@ -521,6 +533,10 @@ def pull(
     python_exe: Optional[str] = typer.Option(
         None, "--python", help="Target interpreter for the runner pip install (default: this venv)."
     ),
+    instance: Optional[str] = typer.Option(
+        None, "--instance", help="For a v4 vLLM bundle: force a registered tt-metal instance by "
+        "name instead of auto-selecting the newest that satisfies the manifest's ranges."
+    ),
 ) -> None:
     """Download a bundle and install everything it carries: kernels, runner, weights.
 
@@ -549,7 +565,7 @@ def pull(
             _install_vllm_bundle(
                 repo_id, snapshot, manifest, force=force, arch=arch,
                 models_dir=models_dir, bundles_dir=bundles_dir,
-                with_weights=with_weights and not no_weights,
+                with_weights=with_weights and not no_weights, instance=instance,
             )
             return
 
@@ -707,8 +723,14 @@ def pull(
 
 
 def _record_pull(repo_id, manifest, out_root, *, runner_installed, weights_path, last_error,
-                 bundle_path=None) -> None:
-    """Write the install binding to the local index (overwrites on re-pull)."""
+                 bundle_path=None, instance=None) -> None:
+    """Write the install binding to the local index (overwrites on re-pull).
+
+    For a v4 vLLM bundle, ``instance`` is the selected tt-metal activation, pinned here so
+    ``serve`` replays exactly the build ``pull`` resolved against. The declared ranges are
+    stored too, so a stale pin (build removed) can be re-resolved gracefully at serve time.
+    """
+    ttnn_range, vllm_range, plugin_range = _manifest_ranges(manifest)
     entry = {
         "name": manifest.name,
         "build_key": manifest.build_key,
@@ -725,22 +747,90 @@ def _record_pull(repo_id, manifest, out_root, *, runner_installed, weights_path,
         "python_installed": runner_installed,
         "weights_installed": weights_path is not None,
         "installed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        # Pinned tt-metal instance (v4) + the ranges, for serve replay / re-resolve.
+        "instance_name": instance.name if instance else None,
+        "instance_python": instance.python if instance else None,
+        "instance_tt_metal_home": instance.tt_metal_home if instance else None,
+        "instance_env": dict(instance.env) if instance else None,
+        "platform_ttnn": ttnn_range,
+        "runtime_version": vllm_range,
+        "runtime_plugin_version": plugin_range,
     }
     if last_error:
         entry["last_error"] = last_error
     localdb.record(repo_id, entry)
 
 
+def _manifest_ranges(manifest):
+    """The (ttnn, vllm, plugin) ranges a v4 manifest declares (any may be None)."""
+    ttnn = manifest.platform.ttnn if manifest.platform else None
+    vllm = manifest.runtime.version if manifest.runtime else None
+    plugin = manifest.runtime.plugin_version if manifest.runtime else None
+    return ttnn, vllm, plugin
+
+
+def _select_instance(manifest, *, arch, instance_override, force):
+    """Resolve which tt-metal instance a v4 bundle should link to, and the LocalEnv to gate on.
+
+    Returns ``(instance | None, LocalEnv)``. The env carries hardware facts (arch/device_count
+    from tt-smi, build-independent) with the ttnn/vLLM/plugin versions overridden to the
+    **selected** instance's, so ``compare()`` gates on what will actually run. When no instance
+    satisfies the ranges: with ``--force`` we fall back to the active env (loud warning); without
+    it the caller blocks. A v3 / range-less bundle selects nothing (active env, as before).
+    """
+    base = metal.local_env(arch_override=arch, probe=False)
+    if not (manifest.is_v4 and (manifest.platform or manifest.runtime)):
+        return None, base
+
+    ttnn, vllm, plugin = _manifest_ranges(manifest)
+    if instance_override:
+        match = next((i for i in instances.all_instances() if i.name == instance_override), None)
+        if match is None:
+            raise _err(f"--instance {instance_override!r} not found. See `tt-kernel instances list`.")
+        chosen, v = match, instances.probe_versions(match)
+    else:
+        result = instances.select(ttnn=ttnn, vllm=vllm, plugin=plugin)
+        if result.chosen is None:
+            typer.secho(f"  ! {result.reason}", fg=typer.colors.YELLOW)
+            for c in result.candidates:
+                typer.secho(f"      - {c.instance.name}: ttnn={c.versions.ttnn} "
+                            f"vllm={c.versions.vllm} plugin={c.versions.plugin}",
+                            fg=typer.colors.YELLOW)
+            if not force:
+                raise _err("No installed tt-metal instance satisfies this model's ranges. "
+                           "Install/register one (`tt-kernel instances add`), or --force to "
+                           "install against the active environment anyway.")
+            chosen = instances.active_instance()
+            v = instances.probe_versions(chosen)
+            typer.secho(f"  ! --force: linking to the active environment ({chosen.python})",
+                        fg=typer.colors.YELLOW)
+        else:
+            chosen, v = result.chosen, next(c.versions for c in result.candidates
+                                            if c.instance is result.chosen)
+        typer.secho(f"  tt-metal instance: {chosen.name} "
+                    f"(ttnn={v.ttnn}, vllm={v.vllm}, plugin={v.plugin})", fg=typer.colors.CYAN)
+
+    # A probe that fails (missing .so, NFS timeout — all swallowed) yields None; do NOT let it
+    # clobber the really-installed version, or the range gate silently becomes a no-op and an
+    # incompatible bundle installs clean. Fall back to the detected local value.
+    base.tt_metal_version = v.ttnn or base.tt_metal_version
+    base.vllm_version = v.vllm or base.vllm_version
+    base.vllm_plugin_version = v.plugin or base.vllm_plugin_version
+    return chosen, base
+
+
 def _install_vllm_bundle(
-    repo_id, snapshot, manifest, *, force, arch, models_dir, bundles_dir, with_weights
+    repo_id, snapshot, manifest, *, force, arch, models_dir, bundles_dir, with_weights,
+    instance=None,
 ) -> None:
     """Install a kernels-less vLLM bundle: verify + lay the model folder into bundles_dir.
 
     No tt-metal cache is touched. Optionally downloads weights (default: skip — the model
     class fetches them from the HF id at load). Records the install for `run`/`serve`/`rm`.
     """
-    # arch is the only fatal gate for a kernels-less bundle (see manifest.compare).
-    env = metal.local_env(arch_override=arch, probe=False)
+    # For a v4 bundle, resolve which installed tt-metal instance satisfies its ranges and gate
+    # on THAT instance's versions; arch stays the only fatal gate (see manifest.compare).
+    selected, env = _select_instance(manifest, arch=arch, instance_override=instance, force=force)
     report = compare(manifest, env)
     _print_report(report)
     _warn_toolchain()
@@ -818,9 +908,105 @@ def _install_vllm_bundle(
                         fg=typer.colors.YELLOW)
 
     _record_pull(repo_id, manifest, out_root="", runner_installed=False,
-                 weights_path=weights_path, last_error=None, bundle_path=str(dest))
+                 weights_path=weights_path, last_error=None, bundle_path=str(dest),
+                 instance=selected)
     typer.secho(f"✓ Installed {repo_id}", fg=typer.colors.GREEN)
     typer.secho(f"  Serve it:  tt-kernel serve {repo_id}", fg=typer.colors.CYAN)
+
+
+# --------------------------------------------------------------------- instances
+@instances_app.command("list")
+def instances_list(
+    for_repo: Optional[str] = typer.Option(
+        None, "--for", help="Mark which instances satisfy this bundle's manifest ranges."
+    ),
+    refresh: bool = typer.Option(False, "--refresh", help="Re-probe versions (ignore the cache)."),
+) -> None:
+    """List the tt-metal instances discovered on this host (active + registry + scan)."""
+    ranges = (None, None, None)
+    show_compat = False  # only mark ✓/✗ when we actually retrieved the bundle's requirements
+    if for_repo:
+        try:
+            m = hub.fetch_manifest(*_split_revision(for_repo))
+            ranges = _manifest_ranges(m)
+            show_compat = True
+        except Exception as exc:  # noqa: BLE001
+            # Don't fall through and green-check every row against empty requirements we never
+            # fetched — just list the instances and say the comparison is unavailable.
+            typer.secho(f"  ! could not fetch {for_repo}: {exc} (skipping compatibility column)",
+                        fg=typer.colors.YELLOW)
+    insts = instances.all_instances()
+    if not insts:
+        typer.echo("No tt-metal instances found.")
+        return
+    for inst in insts:
+        v = instances.probe_versions(inst, use_cache=not refresh)
+        line = (f"[{inst.source}] {inst.name}: ttnn={v.ttnn or '—'} vllm={v.vllm or '—'} "
+                f"plugin={v.plugin or '—'}  ({inst.python})")
+        color = None
+        if show_compat:
+            ok = (toolchain.version_satisfies(v.ttnn, ranges[0]) is not False
+                  and toolchain.version_satisfies(v.vllm, ranges[1]) is not False
+                  and toolchain.version_satisfies(v.plugin, ranges[2]) is not False)
+            line = ("✓ " if ok else "✗ ") + line
+            color = typer.colors.GREEN if ok else typer.colors.RED
+        typer.secho(line, fg=color)
+    # Surface checkouts found by scan that can't be launched (no interpreter), for visibility.
+    for home, py in instances.scan_checkouts():
+        if py is None:
+            typer.secho(f"[scan] {home}: found but no interpreter (build/python_env missing) — "
+                        "register manually with `tt-kernel instances add`", fg=typer.colors.YELLOW)
+
+
+@instances_app.command("add")
+def instances_add(
+    name: str = typer.Option(..., "--name", help="A short name for this instance."),
+    python: str = typer.Option(..., "--python", help="Path to the instance's Python interpreter."),
+    tt_metal_home: Optional[str] = typer.Option(None, "--tt-metal-home", help="TT_METAL_HOME for it."),
+    env: Optional[List[str]] = typer.Option(
+        None, "--env", help="Extra activation env as KEY=VALUE (repeatable), e.g. --env LD_LIBRARY_PATH=..."
+    ),
+) -> None:
+    """Register a tt-metal instance the manager will consider for selection."""
+    env_map = {}
+    for item in env or []:
+        if "=" not in item:
+            raise _err(f"--env {item!r} must be KEY=VALUE.")
+        k, val = item.split("=", 1)
+        env_map[k.strip()] = val
+    inst = instances.add_instance(name, python, tt_metal_home=tt_metal_home, env=env_map)
+    typer.secho(f"✓ Registered instance {inst.name} -> {inst.python}", fg=typer.colors.GREEN)
+
+
+@instances_app.command("remove")
+def instances_remove(
+    name: str = typer.Argument(..., help="Name of the registered instance to remove."),
+) -> None:
+    """Remove a registered tt-metal instance (scan/active instances can't be removed)."""
+    if instances.remove_instance(name):
+        typer.secho(f"✓ Removed instance {name}", fg=typer.colors.GREEN)
+    else:
+        raise _err(f"No registered instance named {name!r}.")
+
+
+@instances_app.command("scan")
+def instances_scan(
+    refresh: bool = typer.Option(True, "--refresh/--no-refresh", help="Re-probe versions."),
+) -> None:
+    """Auto-discover tt-metal checkouts under the scan roots and report them."""
+    pairs = instances.scan_checkouts()
+    if not pairs:
+        typer.echo("No tt-metal checkouts found under the scan roots.")
+        return
+    for home, py in pairs:
+        if py is None:
+            typer.secho(f"  {home}: found (no interpreter — register manually)", fg=typer.colors.YELLOW)
+            continue
+        inst = instances.Instance(name=f"scan:{Path(home).name}", python=py,
+                                  tt_metal_home=home, source="scan")
+        v = instances.probe_versions(inst, use_cache=not refresh)
+        typer.secho(f"  {home}: ttnn={v.ttnn or '—'} vllm={v.vllm or '—'} plugin={v.plugin or '—'} "
+                    f"({py})", fg=typer.colors.GREEN)
 
 
 # ------------------------------------------------------------------------- doctor
@@ -872,6 +1058,10 @@ def _report_bundle_requirements(repo_id: str, arch: Optional[str]) -> bool:
     if manifest.runtime and manifest.runtime.version:
         _line(f"{manifest.runtime.kind}", manifest.runtime.version, env.vllm_version,
               "install the Tenstorrent vLLM fork+plugin in range (see scripts/install.sh)")
+    if manifest.runtime and manifest.runtime.plugin_version:
+        _line(f"{manifest.runtime.kind} plugin", manifest.runtime.plugin_version,
+              env.vllm_plugin_version,
+              "install a matching vllm_tt_plugin (see scripts/install.sh)")
     if manifest.target:
         typer.secho(f"  · target: {manifest.target}  (detected arch={env.arch or '—'}, "
                     f"devices={env.device_count})", fg=typer.colors.CYAN)
@@ -879,6 +1069,16 @@ def _report_bundle_requirements(repo_id: str, arch: Optional[str]) -> bool:
         typer.secho(f"  · authored against tt-metal {manifest.tt_metal_version} "
                     "(v3 bundle — no version ranges declared)", fg=typer.colors.CYAN)
     return not unmet
+
+    # Which installed tt-metal instance would serve this model.
+    if manifest.platform or manifest.runtime:
+        ttnn, vllm, plugin = _manifest_ranges(manifest)
+        result = instances.select(ttnn=ttnn, vllm=vllm, plugin=plugin)
+        if result.chosen:
+            typer.secho(f"  → would link to instance: {result.reason}", fg=typer.colors.GREEN)
+        else:
+            typer.secho(f"  → no instance selectable: {result.reason} "
+                        "(register one with `tt-kernel instances add`)", fg=typer.colors.YELLOW)
 
 
 @app.command()
@@ -961,7 +1161,8 @@ def _endpoint_from_command(command: List[str]) -> str:
 
 
 def _ensure_vllm_pulled(repo_id: str, revision: Optional[str], *, arch: Optional[str],
-                        bundles_dir: Optional[str], force: bool = False) -> dict:
+                        bundles_dir: Optional[str], force: bool = False,
+                        instance: Optional[str] = None) -> dict:
     """Return the local install entry for a vLLM bundle, pulling it first if absent."""
     entry = localdb.get(repo_id)
     if entry and entry.get("bundle_path") and Path(entry["bundle_path"]).is_dir():
@@ -975,23 +1176,61 @@ def _ensure_vllm_pulled(repo_id: str, revision: Optional[str], *, arch: Optional
         if not (manifest.runner and manifest.runner.is_vllm):
             raise _err(f"{repo_id} is not a vLLM bundle.")
         _install_vllm_bundle(repo_id, snapshot, manifest, force=force, arch=arch,
-                             models_dir=None, bundles_dir=bundles_dir, with_weights=False)
+                             models_dir=None, bundles_dir=bundles_dir, with_weights=False,
+                             instance=instance)
     entry = localdb.get(repo_id)
     if not entry or not entry.get("bundle_path"):
         raise _err(f"Failed to install vLLM bundle {repo_id}.")
     return entry
 
 
+def _serve_activation(entry: dict, *, instance_override: Optional[str]):
+    """Resolve the tt-metal activation to launch under: ``(python|None, activation_env, label)``.
+
+    Replays the instance ``pull`` pinned into ``entry``. Graceful degradation:
+    ``--instance`` wins outright; a pin whose interpreter still exists is used as-is; a pin
+    that vanished is **re-resolved** from the stored ranges (newest satisfying); and when
+    nothing is pinned or resolvable we fall back to the ambient env (``python=None``) — which
+    is exactly the pre-registry behavior, so v3 / range-less bundles are unaffected.
+    """
+    if instance_override:
+        match = next((i for i in instances.all_instances() if i.name == instance_override), None)
+        if match is None:
+            raise _err(f"--instance {instance_override!r} not found. See `tt-kernel instances list`.")
+        return match.python, match.activation_env(), match.name
+
+    py = entry.get("instance_python")
+    if py and Path(py).exists():
+        env = dict(entry.get("instance_env") or {})
+        home = entry.get("instance_tt_metal_home")
+        if home:
+            env.setdefault("TT_METAL_HOME", home)
+        return py, env, entry.get("instance_name") or py
+    if py:  # pinned build is gone — re-resolve from the recorded ranges
+        typer.secho(f"  ! pinned tt-metal instance missing ({py}); re-resolving from ranges...",
+                    fg=typer.colors.YELLOW)
+        result = instances.select(ttnn=entry.get("platform_ttnn"),
+                                  vllm=entry.get("runtime_version"),
+                                  plugin=entry.get("runtime_plugin_version"))
+        if result.chosen:
+            typer.secho(f"  re-resolved -> {result.chosen.name}", fg=typer.colors.CYAN)
+            return result.chosen.python, result.chosen.activation_env(), result.chosen.name
+        typer.secho("  ! no instance satisfies the ranges; using the active environment "
+                    "(consider `tt-kernel pull` again).", fg=typer.colors.YELLOW)
+    return None, {}, None
+
+
 def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, local_only: bool,
                 arch: Optional[str], bundles_dir: Optional[str], do_health: bool,
-                force: bool = False) -> None:
+                force: bool = False, instance: Optional[str] = None) -> None:
     """The vLLM one-command serve flow: pull-if-needed, launch, (optional) health, endpoint."""
     if local_only:
         entry = localdb.get(repo_id)
         if not entry or not entry.get("bundle_path"):
             raise _err(f"No installed vLLM bundle for {repo_id} (and --local-only forbids a pull).")
     else:
-        entry = _ensure_vllm_pulled(repo_id, revision, arch=arch, bundles_dir=bundles_dir, force=force)
+        entry = _ensure_vllm_pulled(repo_id, revision, arch=arch, bundles_dir=bundles_dir,
+                                    force=force, instance=instance)
 
     bundle_path = Path(entry["bundle_path"])
     if not bundle_path.is_dir():
@@ -1006,22 +1245,39 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
             f"(tried: {cands}). Add one, or set a 'default'."
         )
 
-    argv = runtime.vllm_serve_argv(launch.command)
-    env = runtime.vllm_serve_env(extra_models_dir, launch.env)
+    inst_python, activation_env, inst_label = _serve_activation(entry, instance_override=instance)
+    argv = runtime.vllm_serve_argv(launch.command, python=inst_python)
+    env = runtime.vllm_serve_env(extra_models_dir, launch.env, activation_env=activation_env)
     endpoint = _endpoint_from_command(launch.command)
 
-    typer.secho(f"[vLLM: {md.arch} via {mkey}; EXTRA_MODELS_DIR={extra_models_dir}]",
+    # If a pin was requested but the launch command's first token isn't a Python interpreter,
+    # the interpreter can't be substituted — the process would run under the ambient one while
+    # this build's env is exported. Warn loudly rather than silently mis-pin (see review G2).
+    if inst_python and launch.command and not runtime.is_python_command(launch.command[0]):
+        typer.secho(
+            f"  ! instance {inst_label} was selected, but the bundle's launch command starts "
+            f"with {launch.command[0]!r} (not a Python interpreter), so the pinned interpreter "
+            "could not be applied — the server may run under the wrong tt-metal build.",
+            fg=typer.colors.YELLOW,
+        )
+
+    via = f"{mkey}" + (f"; instance={inst_label}" if inst_label else "")
+    typer.secho(f"[vLLM: {md.arch} via {via}; EXTRA_MODELS_DIR={extra_models_dir}]",
                 fg=typer.colors.CYAN)
     typer.secho(f"  OpenAI endpoint (once up): {endpoint}", fg=typer.colors.CYAN)
     if print_only:
         exports = " ".join(f"{k}={v}" for k, v in
-                           {runtime.ENV_EXTRA_MODELS_DIR: str(extra_models_dir), **launch.env}.items())
+                           {**activation_env, runtime.ENV_EXTRA_MODELS_DIR: str(extra_models_dir),
+                            **launch.env}.items())
         typer.echo(f"{exports} " + " ".join(argv))
         return
-    if not runtime.vllm_available():
+    # Check the interpreter that will actually run (the pinned instance's, if any) — not the
+    # manager's, which may be a pipx venv with no vLLM (review G3).
+    if not runtime.vllm_available(python=inst_python):
+        where = f"the pinned instance ({inst_python})" if inst_python else "this environment"
         raise _err(
-            "Cannot serve: the Tenstorrent vLLM stack (vllm + vllm_tt_plugin) is not importable "
-            "here. Install it (see scripts/install.sh), or use --print to emit the command."
+            f"Cannot serve: the Tenstorrent vLLM stack (vllm + vllm_tt_plugin) is not importable "
+            f"in {where}. Install it (see scripts/install.sh), or use --print to emit the command."
         )
     try:
         raise typer.Exit(code=subprocess.run(argv, env=env).returncode)
@@ -1038,6 +1294,10 @@ def serve(
                                "warnings (e.g. an out-of-range ttnn/vLLM) when the pull happens here."),
     arch: Optional[str] = typer.Option(None, "--arch", help="Override arch/machine detection."),
     bundles_dir: Optional[str] = typer.Option(None, "--bundles-dir", help="Override EXTRA_MODELS_DIR location."),
+    instance: Optional[str] = typer.Option(
+        None, "--instance", help="Force a registered tt-metal instance by name (see "
+        "`tt-kernel instances list`), overriding the pinned/auto-resolved one."
+    ),
     health_check: bool = typer.Option(False, "--health-check", help="(reserved) probe the server after launch."),
 ) -> None:
     """Serve a vLLM bundle through the Tenstorrent vLLM plugin (the primary path).
@@ -1049,7 +1309,8 @@ def serve(
     _warn_toolchain()
     repo_id, revision = _split_revision(repo_id)
     _serve_vllm(repo_id, revision, print_only=print_only, local_only=local_only,
-                arch=arch, bundles_dir=bundles_dir, do_health=health_check, force=force)
+                arch=arch, bundles_dir=bundles_dir, do_health=health_check,
+                force=force, instance=instance)
 
 
 @app.command()

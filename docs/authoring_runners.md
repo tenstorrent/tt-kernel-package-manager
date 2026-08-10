@@ -250,7 +250,8 @@ bookkeeping (producer, file index, arch/version detection) at push time.
 // laguna.json — an authored v4 manifest
 {
   "platform":     { "ttnn": ">=0.72,<0.76" },        // PEP 440 range, not an exact pin
-  "runtime":      { "kind": "vllm", "version": ">=0.24" },
+  "runtime":      { "kind": "vllm", "version": ">=0.24",   // vLLM core range
+                    "plugin_version": ">=0.3,<0.4" },      // Tenstorrent vLLM plugin range
   "target":       "p150x4",                            // searchable machine SKU
   "mesh":         { "devices": 4, "topology": "1x4", "fabric": "FABRIC_1D_RING" },
   "entrypoint":   { "class": "ttlaguna.generator_vllm:LagunaForCausalLM",
@@ -283,11 +284,35 @@ the escape hatches under `resources`:
 - `"command_override": { "default": ["python3","my_server.py", ...],
    "blackhole-4card": [...] }` — replaces composition entirely, per machine key.
 
-**How compatibility is resolved.** `platform.ttnn` and `runtime.version` are *ranges*.
-On `pull`, an installed version outside the range is a **forceable** block (`--force`
-overrides), never fatal — only an `arch` mismatch is fatal. A dev checkout whose version is a
-bare git sha is treated as "assume OK" and never falsely blocked. `tt-kernel doctor you/laguna`
-prints the required-vs-installed verdict (and how to get in range) without installing anything.
+**How compatibility is resolved.** `platform.ttnn`, `runtime.version` (vLLM core), and
+`runtime.plugin_version` (the `vllm_tt_plugin` package) are all *ranges*. On `pull`, an installed
+version outside a range is a **forceable** block (`--force` overrides), never fatal — only an
+`arch` mismatch is fatal. A dev checkout whose version is a bare git sha is treated as "assume
+OK" and never falsely blocked. `tt-kernel doctor you/laguna` prints the required-vs-installed
+verdict (and how to get in range) without installing anything. Omitting `plugin_version` keeps
+the legacy presence-only plugin check (the fork tracks `dev`).
+
+**Linking to the right tt-metal build (instances).** When a host has several tt-metal builds,
+tt-kernel doesn't guess from whatever venv is active — it consults an **instance registry** (the
+supply side). On `pull` it selects the **newest installed instance that satisfies all three
+ranges** and **pins** that instance's activation (interpreter + `TT_METAL_HOME` / `PYTHONPATH` /
+`LD_LIBRARY_PATH`) into the install record; `serve` then launches the server under that exact
+build (re-resolving gracefully if the pinned build was removed). Manage instances with:
+
+```bash
+tt-kernel instances list --for you/laguna   # what's installed, and which satisfy this model
+tt-kernel instances add --name metal-0.73 \  # register a build auto-scan can't find
+  --python /opt/tt/0.73/venv/bin/python --tt-metal-home /opt/tt/0.73
+tt-kernel instances scan                     # auto-discover tt-metal checkouts
+tt-kernel pull  you/laguna --instance metal-0.73   # force a specific instance
+tt-kernel serve you/laguna --instance metal-0.73
+```
+
+Instances are discovered from three sources, unioned: the **active** interpreter (always a
+candidate — a single-build box behaves as before), explicit **registry** entries in
+`~/.config/tt-kernel/instances.json` (the manager owns this file), and an **auto-scan** of
+tt-metal checkouts under the scan roots. tt-kernel never *installs* a tt-metal — it only
+selects among what's present and reports what's missing.
 
 **Discovery.** `push` tags the repo with its `arch` and `target`, so consumers can ask
 `tt-kernel search --target p150x4` / `--arch blackhole` for "what runs on my box".
