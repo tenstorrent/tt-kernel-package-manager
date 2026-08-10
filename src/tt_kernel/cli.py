@@ -19,7 +19,7 @@ from typing import List, Optional
 import typer
 
 from . import MANIFEST_NAME, TT_KERNEL_CATALOG_TAG, TT_KERNEL_TAG, __version__
-from . import auth, bundles, cache, hub, localdb, metal, resolve as resolve_mod, runtime, toolchain
+from . import auth, bundles, cache, device, hub, localdb, metal, resolve as resolve_mod, runtime, toolchain
 from .manifest import (
     CompatibilityReport,
     FileEntry,
@@ -312,17 +312,30 @@ def _build_v4_manifest(
     resolved_arch = arch or raw.get("arch") or dev.arch
     if not resolved_arch:
         raise _err("Could not resolve arch. Set 'arch' in the manifest or pass --arch.")
-    mesh_devices = (raw.get("mesh") or {}).get("devices") if isinstance(raw.get("mesh"), dict) else None
-    device_count = raw.get("device_count") or dev.device_count or mesh_devices or 1
+    # Normalize the arch the same way every other push path does (dev.arch is already
+    # normalized), so `--arch bh` publishes "blackhole" — not "bh", which would be a fatal
+    # mismatch on every consumer and invisible to `search --arch blackhole`.
+    resolved_arch = device.normalize_arch(resolved_arch)
 
-    # Override authored weights only when --weights is given; else keep the manifest's.
+    # The authored mesh/device_count describes the model's real topology; it must win over the
+    # PUSHER's box (a 4-card model authored on a 1-card dev host must not publish device_count 1).
+    mesh_devices = (raw.get("mesh") or {}).get("devices") if isinstance(raw.get("mesh"), dict) else None
+    device_count = raw.get("device_count") or mesh_devices or dev.device_count or 1
+
+    # Merge the --weights-* flags onto the authored weights block. The scoping flags
+    # (revision/allow/ignore) apply to the manifest's OWN repo too; only the repo id itself is
+    # guarded by --weights (a bare `--weights-allow` must still filter the authored repo).
+    wblock = dict(raw.get("weights") or {})
     if weights:
-        raw["weights"] = {
-            "repo": weights,
-            **({"revision": weights_revision} if weights_revision else {}),
-            **({"allow_patterns": weights_allow} if weights_allow else {}),
-            **({"ignore_patterns": weights_ignore} if weights_ignore else {}),
-        }
+        wblock["repo"] = weights
+    if weights_revision:
+        wblock["revision"] = weights_revision
+    if weights_allow:
+        wblock["allow_patterns"] = weights_allow
+    if weights_ignore:
+        wblock["ignore_patterns"] = weights_ignore
+    if wblock:
+        raw["weights"] = wblock
 
     raw.update(
         schema_version="4",
@@ -406,6 +419,10 @@ def _push_vllm(
             for c in (manifest.capabilities.tool_parser, manifest.capabilities.reasoning_parser):
                 if c:
                     tags.append(f"parser:{c.lower()}")
+        # Honor --capability on the v4 path too (the recommended authoring mode) so the
+        # catalog badges/filters the flag promises actually appear.
+        if capability:
+            tags.extend(c.strip().lower() for c in capability if c.strip())
     else:
         # ---- legacy: verbatim vllm_metadata.json ----
         if folder is None:
@@ -739,6 +756,14 @@ def _install_vllm_bundle(
     # for the legacy path the author-written vllm_metadata.json). For a v4 bundle the plugin
     # file is rendered by tt-kernel, not shipped, so it is simply absent from the index.
     bundle_entries = [f for f in manifest.files if f.path.startswith(f"{subdir}/")]
+    # Fail closed: a shipped folder that the manifest doesn't index would otherwise be copied
+    # into EXTRA_MODELS_DIR (which the plugin imports as Python) with NO integrity check — the
+    # exact hole a tampered/emptied `files` list opens. If code is present, it must be indexed.
+    if staged.is_dir() and any(staged.iterdir()) and not bundle_entries:
+        raise _err(
+            f"Bundle ships a {subdir}/ folder but the manifest indexes no files for it — "
+            "refusing to install unverified code. Re-publish with a current tt-kernel."
+        )
     if bundle_entries:
         typer.echo(f"Verifying {len(bundle_entries)} bundle file(s) ...")
         # verify_files takes paths relative to a root; the entry paths carry the subdir prefix,
@@ -754,7 +779,14 @@ def _install_vllm_bundle(
 
     if manifest.is_v4:
         # v4: tt-kernel is the source of truth — lay down any shipped code, then RENDER
-        # vllm_metadata.json from the one authoritative manifest.
+        # vllm_metadata.json from the one authoritative manifest. `is_v4` is true for a
+        # platform-only manifest too, but rendering needs an entrypoint — guard it with a
+        # clean CLI error instead of letting render_vllm_metadata raise a raw ValueError.
+        if manifest.entrypoint is None:
+            raise _err(
+                "v4 bundle manifest has no 'entrypoint' — cannot render vllm_metadata.json. "
+                "The bundle is malformed; re-publish it with a current tt-kernel."
+            )
         if staged.is_dir():
             dest = bundles.install_bundle(staged, bdir, key)
         else:  # entrypoint is a tt-metal built-in; no code shipped — just make the folder.
@@ -799,22 +831,29 @@ def _warn_toolchain() -> None:
         typer.secho(f"  ! {c.name}: {c.message}", fg=typer.colors.YELLOW)
 
 
-def _report_bundle_requirements(repo_id: str, arch: Optional[str]) -> None:
+def _report_bundle_requirements(repo_id: str, arch: Optional[str]) -> bool:
     """Declaratively resolve a v4 bundle's platform/runtime ranges against the local env.
 
     Prints required-vs-installed for each declared range and, when unsatisfied, the exact
     hint to get compatible — but NEVER installs anything (provisioning is out of scope; that
     is a future tt-cli concern). A v3 bundle (no ranges) just echoes its recorded versions.
+
+    Returns ``True`` when every declared range is satisfied (or can't be assessed) and
+    ``False`` when at least one installed version is decisively out of range — so ``doctor``
+    can honor its documented "exits non-zero if below the required version" contract instead
+    of printing a ✗ and exiting 0.
     """
     try:
         manifest = hub.fetch_manifest(repo_id, None)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 — can't assess; don't fail the gate on a fetch error
         typer.secho(f"  ! could not fetch manifest for {repo_id}: {exc}", fg=typer.colors.YELLOW)
-        return
+        return True
     env = metal.local_env(arch_override=arch, probe=False)
     typer.secho(f"\nBundle requirements — {repo_id}:", bold=True)
+    unmet = False
 
     def _line(label: str, spec: Optional[str], installed: Optional[str], hint: str) -> None:
+        nonlocal unmet
         if not spec:
             return
         ok = toolchain.version_satisfies(installed, spec)
@@ -824,6 +863,7 @@ def _report_bundle_requirements(repo_id: str, arch: Optional[str]) -> None:
             mark, color, note = "✓", typer.colors.GREEN, ""
         else:
             mark, color, note = "✗", typer.colors.RED, f"-> {hint}"
+            unmet = True
         typer.secho(f"  {mark} {label}: require {spec}, installed {installed or '—'} {note}", fg=color)
 
     if manifest.platform and manifest.platform.ttnn:
@@ -838,6 +878,7 @@ def _report_bundle_requirements(repo_id: str, arch: Optional[str]) -> None:
     if not (manifest.platform or manifest.runtime):
         typer.secho(f"  · authored against tt-metal {manifest.tt_metal_version} "
                     "(v3 bundle — no version ranges declared)", fg=typer.colors.CYAN)
+    return not unmet
 
 
 @app.command()
@@ -874,10 +915,11 @@ def doctor(
         typer.secho("  ! no Tenstorrent device detected (tt-smi/ARCH_NAME unavailable)",
                     fg=typer.colors.YELLOW)
 
+    reqs_ok = True
     if repo_id:
-        _report_bundle_requirements(repo_id, arch)
+        reqs_ok = _report_bundle_requirements(repo_id, arch)
 
-    if not report.ok:
+    if not report.ok or not reqs_ok:
         raise typer.Exit(code=1)
     typer.secho("\n✓ toolchain adequate", fg=typer.colors.GREEN)
 
@@ -919,7 +961,7 @@ def _endpoint_from_command(command: List[str]) -> str:
 
 
 def _ensure_vllm_pulled(repo_id: str, revision: Optional[str], *, arch: Optional[str],
-                        bundles_dir: Optional[str]) -> dict:
+                        bundles_dir: Optional[str], force: bool = False) -> dict:
     """Return the local install entry for a vLLM bundle, pulling it first if absent."""
     entry = localdb.get(repo_id)
     if entry and entry.get("bundle_path") and Path(entry["bundle_path"]).is_dir():
@@ -932,7 +974,7 @@ def _ensure_vllm_pulled(repo_id: str, revision: Optional[str], *, arch: Optional
         manifest = Manifest.from_json(mpath.read_text())
         if not (manifest.runner and manifest.runner.is_vllm):
             raise _err(f"{repo_id} is not a vLLM bundle.")
-        _install_vllm_bundle(repo_id, snapshot, manifest, force=False, arch=arch,
+        _install_vllm_bundle(repo_id, snapshot, manifest, force=force, arch=arch,
                              models_dir=None, bundles_dir=bundles_dir, with_weights=False)
     entry = localdb.get(repo_id)
     if not entry or not entry.get("bundle_path"):
@@ -941,14 +983,15 @@ def _ensure_vllm_pulled(repo_id: str, revision: Optional[str], *, arch: Optional
 
 
 def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, local_only: bool,
-                arch: Optional[str], bundles_dir: Optional[str], do_health: bool) -> None:
+                arch: Optional[str], bundles_dir: Optional[str], do_health: bool,
+                force: bool = False) -> None:
     """The vLLM one-command serve flow: pull-if-needed, launch, (optional) health, endpoint."""
     if local_only:
         entry = localdb.get(repo_id)
         if not entry or not entry.get("bundle_path"):
             raise _err(f"No installed vLLM bundle for {repo_id} (and --local-only forbids a pull).")
     else:
-        entry = _ensure_vllm_pulled(repo_id, revision, arch=arch, bundles_dir=bundles_dir)
+        entry = _ensure_vllm_pulled(repo_id, revision, arch=arch, bundles_dir=bundles_dir, force=force)
 
     bundle_path = Path(entry["bundle_path"])
     if not bundle_path.is_dir():
@@ -991,6 +1034,8 @@ def serve(
     repo_id: str = typer.Argument(..., help="vLLM bundle id (namespace/name[@rev]) to serve."),
     print_only: bool = typer.Option(False, "--print", help="Print the launch command instead of running it."),
     local_only: bool = typer.Option(False, "--local-only", help="Do not pull; require an installed bundle."),
+    force: bool = typer.Option(False, "--force", help="Install despite non-fatal compatibility "
+                               "warnings (e.g. an out-of-range ttnn/vLLM) when the pull happens here."),
     arch: Optional[str] = typer.Option(None, "--arch", help="Override arch/machine detection."),
     bundles_dir: Optional[str] = typer.Option(None, "--bundles-dir", help="Override EXTRA_MODELS_DIR location."),
     health_check: bool = typer.Option(False, "--health-check", help="(reserved) probe the server after launch."),
@@ -1004,7 +1049,7 @@ def serve(
     _warn_toolchain()
     repo_id, revision = _split_revision(repo_id)
     _serve_vllm(repo_id, revision, print_only=print_only, local_only=local_only,
-                arch=arch, bundles_dir=bundles_dir, do_health=health_check)
+                arch=arch, bundles_dir=bundles_dir, do_health=health_check, force=force)
 
 
 @app.command()

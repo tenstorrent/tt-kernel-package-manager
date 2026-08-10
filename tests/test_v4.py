@@ -96,9 +96,14 @@ def test_unknown_schema_rejected():
     ("0.73.0", ">=0.72,<0.76", True),
     ("0.80.0", ">=0.72,<0.76", False),
     ("0.72.0-5-gabc", ">=0.72,<0.76", True),   # git-describe decoration tolerated
+    ("v0.74.1", ">=0.72,<0.76", True),         # leading v stripped
     ("deadbeef", ">=0.72,<0.76", None),        # bare sha -> assume OK
     (None, ">=0.72", None),                    # unresolved -> assume OK
     ("0.73.0", "not-a-spec!!", None),          # malformed spec -> None, never raises
+    # Prereleases must keep their patch level (regression: was truncated to 0.72 before).
+    ("0.72.3rc1", ">=0.72.2", True),           # rc of a patch that IS in range
+    ("0.56.0rc1", ">=0.56.0", False),          # too-old prerelease correctly rejected
+    ("1.1.3+light", ">=1.1.0", True),          # local/build metadata tolerated
 ])
 def test_version_satisfies(installed, spec, expected):
     assert toolchain.version_satisfies(installed, spec) is expected
@@ -256,6 +261,110 @@ def test_v4_push_pull_serve_roundtrip(monkeypatch, tmp_path):
     assert "MESH_DEVICE=P150" in serve.output
 
 
+def _published_manifest(remotes, repo_id):
+    return json.loads((remotes[repo_id] / "tt_kernel_manifest.json").read_text())
+
+
+def test_push_v4_prefers_mesh_devices_and_normalizes_arch(monkeypatch, tmp_path):
+    """F3 + F8: authored mesh.devices beats the pusher's card count; arch is normalized."""
+    remotes = _fake_hub(monkeypatch)
+    # Pusher is a SINGLE-card box; the model targets 4 (mesh.devices) and is pushed with --arch bh.
+    monkeypatch.setattr(metal, "detect_device",
+                        lambda arch_override=None: DeviceInfo(arch="blackhole", device_count=1, source="test"))
+    mp = _write_v4_manifest_file(tmp_path)  # mesh.devices == 4
+    r = runner.invoke(cli.app, ["push", "acme/m", "--private", "--backend", "vllm",
+                                "--manifest", str(mp), "--arch", "bh"])
+    assert r.exit_code == 0, r.output
+    man = _published_manifest(remotes, "acme/m")
+    assert man["device_count"] == 4       # mesh wins over the 1-card pusher
+    assert man["arch"] == "blackhole"     # 'bh' normalized, not stamped raw
+
+
+def test_push_v4_weights_filters_apply_to_manifest_repo(monkeypatch, tmp_path):
+    """F4: --weights-allow filters the manifest's own repo, even without --weights."""
+    remotes = _fake_hub(monkeypatch)
+    mp = _write_v4_manifest_file(tmp_path)  # weights.repo declared in the manifest
+    r = runner.invoke(cli.app, ["push", "acme/w", "--private", "--backend", "vllm",
+                                "--manifest", str(mp), "--weights-allow", "*.safetensors"])
+    assert r.exit_code == 0, r.output
+    w = _published_manifest(remotes, "acme/w")["weights"]
+    assert w["repo_id"] == "poolside/Laguna-XS-2.1"       # authored repo preserved
+    assert w["allow_patterns"] == ["*.safetensors"]        # filter applied to it
+
+
+def test_push_v4_capability_tags(monkeypatch, tmp_path):
+    """F5: --capability is honored on the v4 path (was silently dropped)."""
+    _fake_hub(monkeypatch)
+    tags = {}
+    monkeypatch.setattr(hub, "tag_repo", lambda rid, t: tags.__setitem__(rid, t))
+    mp = _write_v4_manifest_file(tmp_path)
+    r = runner.invoke(cli.app, ["push", "acme/c", "--private", "--backend", "vllm",
+                                "--manifest", str(mp), "--capability", "moe",
+                                "--capability", "sliding-window-attention"])
+    assert r.exit_code == 0, r.output
+    assert "moe" in tags["acme/c"] and "sliding-window-attention" in tags["acme/c"]
+
+
+def test_pull_v4_platform_only_manifest_clean_error(monkeypatch, tmp_path):
+    """F6: a v4-ish manifest with no entrypoint errors cleanly instead of a raw ValueError."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    bdir = tmp_path / "bundles"
+    monkeypatch.setenv(bundles.ENV_BUNDLES_DIR, str(bdir))
+    remotes = _fake_hub(monkeypatch)
+    # Hand-craft a remote whose manifest sets platform (is_v4) + a vLLM runner but NO entrypoint.
+    remote = tmp_path / "remote__acme__bad"
+    remote.mkdir()
+    (remote / "tt_kernel_manifest.json").write_text(json.dumps({
+        "schema_version": "4", "name": "bad", "tt_metal_version": "0.73.0", "arch": "blackhole",
+        "device_count": 4, "build_key": None, "producer": {"tt_kernel_version": "0", "created_at": "t"},
+        "platform": {"ttnn": ">=0.72"},
+        "runner": {"backend": "vllm", "bundle_dir": "vllm_bundle"},
+    }))
+    remotes["acme/bad"] = remote
+    r = runner.invoke(cli.app, ["pull", "acme/bad", "--arch", "blackhole"])
+    assert r.exit_code == 1
+    assert "entrypoint" in r.output.lower() and "Traceback" not in r.output
+    assert not (bdir / "acme__bad").exists()  # nothing installed
+
+
+def test_pull_v4_fails_closed_on_unindexed_folder(monkeypatch, tmp_path):
+    """F10: a shipped folder the manifest doesn't index is refused, not silently installed."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    bdir = tmp_path / "bundles"
+    monkeypatch.setenv(bundles.ENV_BUNDLES_DIR, str(bdir))
+    remotes = _fake_hub(monkeypatch)
+    remote = tmp_path / "remote__acme__tamper"
+    (remote / "vllm_bundle").mkdir(parents=True)
+    (remote / "vllm_bundle" / "evil.py").write_text("print('unverified')\n")  # present…
+    (remote / "tt_kernel_manifest.json").write_text(json.dumps({          # …but NOT indexed
+        "schema_version": "4", "name": "t", "tt_metal_version": "0.73.0", "arch": "blackhole",
+        "device_count": 4, "build_key": None, "producer": {"tt_kernel_version": "0", "created_at": "t"},
+        "entrypoint": {"class": "a:B", "arch_name": "B"}, "files": [],
+        "runner": {"backend": "vllm", "bundle_dir": "vllm_bundle"},
+    }))
+    remotes["acme/tamper"] = remote
+    r = runner.invoke(cli.app, ["pull", "acme/tamper", "--arch", "blackhole"])
+    assert r.exit_code == 1 and "unverified" in r.output.lower()
+    assert not (bdir / "acme__tamper").exists()
+
+
+def test_serve_force_when_pull_out_of_range(monkeypatch, tmp_path):
+    """F1: `serve` accepts --force so the documented one-liner is followable out of range."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    monkeypatch.setenv(bundles.ENV_BUNDLES_DIR, str(tmp_path / "bundles"))
+    _fake_hub(monkeypatch, tt_metal="0.80.0", vllm="0.24.1")  # ttnn out of the manifest's range
+    mp = _write_v4_manifest_file(tmp_path)
+    assert runner.invoke(cli.app, ["push", "acme/s", "--private", "--backend", "vllm",
+                                   "--manifest", str(mp)]).exit_code == 0
+
+    blocked = runner.invoke(cli.app, ["serve", "acme/s", "--print"])
+    assert blocked.exit_code == 1 and "--force" in blocked.output
+
+    forced = runner.invoke(cli.app, ["serve", "acme/s", "--print", "--force"])
+    assert forced.exit_code == 0, forced.output
+    assert "server_example_tt.py" in forced.output
+
+
 def test_v4_push_builtin_entrypoint_no_bundle_dir(monkeypatch, tmp_path):
     """An entrypoint that references a tt-metal built-in needs no shipped code folder."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
@@ -318,7 +427,20 @@ def test_doctor_reports_bundle_ranges(monkeypatch):
     monkeypatch.setattr(toolchain, "check_toolchain", lambda: toolchain.ToolchainReport(components=[]))
 
     res = runner.invoke(cli.app, ["doctor", "acme/laguna", "--arch", "blackhole"])
-    assert res.exit_code == 0, res.output
+    # An out-of-range requirement must fail the gate (doctor's documented contract), not exit 0.
+    assert res.exit_code == 1, res.output
     assert "Bundle requirements" in res.output
     assert "require >=0.72,<0.76, installed 0.80.0" in res.output  # flagged out of range
     assert "target: p150x4" in res.output
+
+
+def test_doctor_in_range_exits_zero(monkeypatch):
+    m = _v4_manifest(platform=Platform(ttnn=">=0.72,<0.76"), runtime=Runtime(version=">=0.24"))
+    monkeypatch.setattr(hub, "fetch_manifest", lambda rid, rev: m)
+    monkeypatch.setattr(metal, "detect_device",
+                        lambda arch_override=None: DeviceInfo(arch="blackhole", device_count=4, source="test"))
+    monkeypatch.setattr(metal, "resolve_version", lambda: "0.73.0")   # in range
+    monkeypatch.setattr(metal, "_vllm_version", lambda: "0.24.1")     # in range
+    monkeypatch.setattr(toolchain, "check_toolchain", lambda: toolchain.ToolchainReport(components=[]))
+    res = runner.invoke(cli.app, ["doctor", "acme/laguna", "--arch", "blackhole"])
+    assert res.exit_code == 0, res.output

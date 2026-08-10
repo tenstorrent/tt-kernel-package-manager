@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.metadata as md
 import importlib.util
+import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -81,6 +82,31 @@ def _meets(version: Optional[str], minimum: str) -> Optional[bool]:
     return v >= _parse_version(minimum)
 
 
+# A ``git describe --tags`` tail: "-<N commits>-g<sha>", optionally "-dirty". This is the only
+# decoration on a real tt-metal/ttnn version string that PEP 440 can't parse; everything else
+# packaging handles natively (rc/pre/post/dev/local), so we strip ONLY this and let Version()
+# see the rest verbatim — never truncating the patch level.
+_GIT_DESCRIBE_TAIL = re.compile(r"-\d+-g[0-9a-f]+(?:-dirty)?$", re.IGNORECASE)
+
+
+def _coerce_version(installed: str):
+    """Parse ``installed`` into a ``packaging.Version``, or ``None`` if it isn't a version.
+
+    Strips a leading ``v`` and a ``git describe`` tail, then hands the string straight to
+    ``Version`` so PEP 440 semantics (rc/pre/post/dev, patch level) are preserved. A bare git
+    sha or other non-version returns ``None`` (caller treats that as "assume OK").
+    """
+    from packaging.version import InvalidVersion, Version
+
+    s = installed.strip().lstrip("vV")
+    for candidate in (s, _GIT_DESCRIBE_TAIL.sub("", s)):
+        try:
+            return Version(candidate)
+        except InvalidVersion:
+            continue
+    return None
+
+
 def version_satisfies(installed: Optional[str], spec: str) -> Optional[bool]:
     """Whether ``installed`` satisfies a PEP 440 range ``spec`` (e.g. ``">=0.72,<0.76"``).
 
@@ -88,35 +114,20 @@ def version_satisfies(installed: Optional[str], spec: str) -> Optional[bool]:
     real version (a bare git sha from ``git describe``), mirroring ``_meets``' ``None``
     semantics so an unpinnable dev checkout is never falsely reported out-of-range. A malformed
     ``spec`` also yields ``None`` rather than raising, so a bad manifest can't hard-crash a
-    resolve. Uses ``packaging`` for correct range semantics (upper bounds, pre-releases).
+    resolve. Uses ``packaging`` for correct range semantics — upper bounds AND pre-releases
+    (``0.72.3rc1`` compares as a real point release, not truncated to ``0.72``).
     """
     if not installed:
         return None
     from packaging.specifiers import InvalidSpecifier, SpecifierSet
-    from packaging.version import InvalidVersion, Version
 
-    try:
-        parsed = Version(_parse_version_str(installed))
-    except InvalidVersion:
+    parsed = _coerce_version(installed)
+    if parsed is None:
         return None
     try:
         return SpecifierSet(spec, prereleases=True).contains(parsed)
     except InvalidSpecifier:
         return None
-
-
-def _parse_version_str(s: str) -> str:
-    """Reduce a possibly-decorated version string to a PEP 440-parseable core.
-
-    ``git describe`` decorations (``"0.72.0-5-gabc"`` -> ``"0.72.0"``) and a ``v`` prefix are
-    stripped; a build suffix (``"1.1.3+light"``) is dropped. Reuses the same leading-numeric
-    extraction as ``_parse_version`` so the two comparators agree on what a version is.
-    """
-    parts = _parse_version(s)
-    if parts is None:
-        # Force InvalidVersion downstream (bare sha / unparseable) -> "assume OK".
-        return "not-a-version"
-    return ".".join(str(p) for p in parts)
 
 
 def _dist_version(dists: Tuple[str, ...]) -> Optional[str]:

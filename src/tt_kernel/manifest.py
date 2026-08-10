@@ -246,10 +246,6 @@ class Manifest(BaseModel):
     entrypoint: Optional[Entrypoint] = None
     resources: Optional[Resources] = None
     capabilities: Optional[Capabilities] = None
-    # Extension wheels shipped inside the bundle folder (adapter deps / custom parsers). The
-    # v4 analogue of ``RunnerPayload.wheels``; paths are relative to the bundle folder and are
-    # laid into EXTRA_MODELS_DIR alongside the adapter code on pull.
-    extensions: List[str] = Field(default_factory=list)
     # Extra process env for serving, overlaid on the rendered launch env.
     env: Dict[str, str] = Field(default_factory=dict)
 
