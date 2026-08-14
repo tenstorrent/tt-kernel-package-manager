@@ -34,8 +34,25 @@ def create_repo(repo_id: str, private: bool) -> str:
     return str(url)
 
 
+def repo_exists(repo_id: str) -> bool:
+    """Report whether the repo already exists on the Hub.
+
+    ``push`` needs this to tell "I am creating this repo" from "I am adding a commit to
+    someone's existing repo": visibility may be set from the flag in the first case, but
+    must never be touched implicitly in the second (see ``cli._ensure_repo``).
+    """
+    from huggingface_hub import repo_exists as hf_repo_exists
+
+    return bool(hf_repo_exists(repo_id=repo_id, repo_type=_REPO_TYPE))
+
+
 def set_visibility(repo_id: str, private: bool) -> None:
-    """Update repo visibility (newer hub uses update_repo_settings)."""
+    """Update repo visibility (newer hub uses update_repo_settings).
+
+    Callers must only reach this when the user *asked* for a visibility change — flipping a
+    repo public is not undoable in the sense that matters (whatever was in it was public for
+    as long as it took to notice).
+    """
     api = _api()
     if hasattr(api, "update_repo_settings"):
         api.update_repo_settings(repo_id=repo_id, repo_type=_REPO_TYPE, private=private)
@@ -93,6 +110,19 @@ def is_private(repo_id: str) -> bool:
     """Report whether a repo is private (a listed catalog entry must be public)."""
     info = _api().model_info(repo_id)
     return bool(getattr(info, "private", False))
+
+
+def is_private_safe(repo_id: str) -> Optional[bool]:
+    """``is_private`` that answers ``None`` instead of raising when the Hub won't say.
+
+    Visibility reporting must never be the thing that fails a push, so callers that only
+    want to *describe* the current state (``push``) use this; callers that need a real
+    answer to make a decision (``publish``) use :func:`is_private` and let it raise.
+    """
+    try:
+        return is_private(repo_id)
+    except Exception:  # noqa: BLE001 — network/permission/404: "unknown", not fatal
+        return None
 
 
 def download_bundle(repo_id: str, revision: Optional[str], dest: Optional[str] = None) -> Path:

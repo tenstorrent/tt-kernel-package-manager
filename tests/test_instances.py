@@ -164,6 +164,9 @@ def _fake_hub(monkeypatch, tmp_path):
         from pathlib import Path
         return Path(dest)
 
+    # The repo does not exist yet, so push takes the create path and never touches
+    # visibility on an existing repo (see cli._ensure_repo).
+    monkeypatch.setattr(hub, "repo_exists", lambda *a, **k: False)
     monkeypatch.setattr(hub, "create_repo", lambda *a, **k: None)
     monkeypatch.setattr(hub, "set_visibility", lambda *a, **k: None)
     monkeypatch.setattr(hub, "tag_repo", lambda *a, **k: None)
