@@ -264,7 +264,7 @@ def push(
     with tempfile.TemporaryDirectory() as td:
         staged = Path(td)
         # Mirror the subtree under <staged>/<build_key>/ so it installs cleanly.
-        shutil.copytree(subtree, staged / str(key))
+        shutil.copytree(subtree, staged / str(key), ignore=cache.ignore_junk)
         # Ship the runner wheel(s) under python/ (uploaded automatically by upload_folder).
         if wheel_paths:
             (staged / "python").mkdir()
@@ -491,7 +491,7 @@ def _push_vllm(
     with tempfile.TemporaryDirectory() as td:
         staged = Path(td)
         if folder is not None:
-            shutil.copytree(folder, staged / subdir)
+            shutil.copytree(folder, staged / subdir, ignore=cache.ignore_junk)
         (staged / MANIFEST_NAME).write_text(manifest.to_json())
 
         typer.echo(f"Creating repo {repo_id} (private={private})")

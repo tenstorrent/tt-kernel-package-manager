@@ -86,6 +86,49 @@ def test_index_and_count(tmp_path):
     }
 
 
+def test_index_skips_bytecode_and_vcs_junk(tmp_path):
+    """`--bundle-dir` points at a working directory, so it usually has a __pycache__.
+
+    Stale bytecode compiled against whatever interpreter the author happened to run has no
+    business in a published bundle, and .git even less.
+    """
+    sub = _make_subtree(tmp_path, 43)
+    (sub / "adapter.py").write_text("# adapter code\n")
+    (sub / "__pycache__").mkdir()
+    (sub / "__pycache__" / "adapter.cpython-312.pyc").write_bytes(b"\x00stale")
+    (sub / ".git").mkdir()
+    (sub / ".git" / "config").write_text("[core]\n")
+    (sub / "loose.pyc").write_bytes(b"\x00stale")
+
+    paths = {e.path for e in cache.index_subtree(sub)}
+    assert "adapter.py" in paths                     # real content still indexed
+    assert not any(p.startswith("__pycache__") for p in paths)
+    assert not any(p.startswith(".git") for p in paths)
+    assert "loose.pyc" not in paths
+
+
+def test_ignore_junk_matches_the_index_filter(tmp_path):
+    """The staged copy must exclude exactly what the manifest index excludes.
+
+    If they disagree, the manifest describes a bundle that is not the one uploaded.
+    """
+    import shutil
+
+    sub = _make_subtree(tmp_path, 44)
+    (sub / "adapter.py").write_text("# adapter code\n")
+    (sub / "__pycache__").mkdir()
+    (sub / "__pycache__" / "adapter.cpython-312.pyc").write_bytes(b"\x00stale")
+
+    staged = tmp_path / "staged"
+    shutil.copytree(sub, staged, ignore=cache.ignore_junk)
+
+    assert (staged / "adapter.py").is_file()
+    assert not (staged / "__pycache__").exists()
+    # Same set of files on both sides of the staging step.
+    assert ({e.path for e in cache.index_subtree(staged)}
+            == {e.path for e in cache.index_subtree(sub)})
+
+
 def test_packaging_roundtrip_and_integrity(tmp_path):
     src_root = tmp_path / "src"
     src_root.mkdir()
