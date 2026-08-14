@@ -20,13 +20,14 @@ import typer
 
 from . import MANIFEST_NAME, TT_KERNEL_CATALOG_TAG, TT_KERNEL_TAG, __version__
 from . import (
-    auth, bundles, cache, device, hub, instances, localdb, metal,
+    auth, bundles, cache, device, hub, instances, localdb, metal, packaging,
     resolve as resolve_mod, runtime, toolchain,
 )
 from .manifest import (
     CompatibilityReport,
     FileEntry,
     Manifest,
+    Mesh,
     Producer,
     RunnerPayload,
     WeightsRef,
@@ -506,6 +507,205 @@ def _push_vllm(
 
     typer.secho(f"✓ Pushed vLLM bundle {repo_id}", fg=typer.colors.GREEN)
     typer.secho(f"  Serve it:  tt-kernel serve {repo_id}", fg=typer.colors.CYAN)
+
+
+# -------------------------------------------------------------------------- package
+def _classify_wheels(wheels_dir: Path) -> dict:
+    """Auto-classify the .whl files in a dir by distribution name prefix.
+
+    "Package what's on your box": the author collects their built wheels in one dir and tt-kernel
+    sorts them — ``ttnn-*`` -> the engine, ``vllm-*`` (not the plugin) -> base vLLM,
+    ``vllm_tt_plugin-*`` -> the plugin, everything else -> extras.
+    """
+    found: dict = {"ttnn": None, "vllm": None, "plugin": None, "extra": []}
+    for whl in sorted(wheels_dir.glob("*.whl")):
+        low = whl.name.lower()
+        if low.startswith("ttnn-"):
+            found["ttnn"] = whl
+        elif low.startswith(("vllm_tt_plugin-", "vllm-tt-plugin-")):
+            found["plugin"] = whl
+        elif low.startswith("vllm-"):
+            found["vllm"] = whl
+        else:
+            found["extra"].append(whl)
+    return found
+
+
+@app.command()
+def package(
+    repo_id: Optional[str] = typer.Argument(
+        None, help="Target HF repo namespace/name to push to. Omit (with --out) to only stage locally."
+    ),
+    from_metal: str = typer.Option(
+        ..., "--from-metal", help="Path to your modified tt-metal-community tree (embedded as metal/)."
+    ),
+    ttnn_wheel: Optional[str] = typer.Option(
+        None, "--ttnn-wheel", help="Your built ttnn wheel (custom kernels compiled in). "
+        "Required unless --wheels-dir supplies one."
+    ),
+    vllm_wheel: Optional[str] = typer.Option(None, "--vllm-wheel", help="The empty-target base vLLM wheel."),
+    plugin_wheel: Optional[str] = typer.Option(None, "--plugin-wheel", help="The vllm_tt_plugin wheel."),
+    extra_wheel: Optional[List[str]] = typer.Option(
+        None, "--extra-wheel", help="Additional wheel to ship (repeatable)."
+    ),
+    wheels_dir: Optional[str] = typer.Option(
+        None, "--wheels-dir", help="Dir of .whl files, auto-classified by filename (ttnn-*, vllm-*, "
+        "vllm_tt_plugin-*). Explicit --*-wheel flags override the auto-picked one."
+    ),
+    metadata: Optional[str] = typer.Option(
+        None, "--metadata", help="Path to a vllm_metadata.json (arch + main_class) to ship. "
+        "Or pass --arch-name and --main-class."
+    ),
+    arch_name: Optional[str] = typer.Option(
+        None, "--arch-name", help="HF architecture name for vllm_metadata (e.g. LlamaForCausalLM)."
+    ),
+    main_class: Optional[str] = typer.Option(
+        None, "--main-class", help="Adapter as module:Class for vllm_metadata "
+        "(e.g. generator_vllm:LlamaForCausalLM)."
+    ),
+    arch: Optional[str] = typer.Option(None, "--arch", help="TT arch (blackhole|wormhole_b0). Detected if omitted."),
+    name: Optional[str] = typer.Option(None, "--name", help="Bundle name (defaults to the repo/metal-dir name)."),
+    weights: Optional[str] = typer.Option(
+        None, "--weights", help="HF model repo id for the weights (a POINTER — weights are not embedded)."
+    ),
+    weights_revision: Optional[str] = typer.Option(None, "--weights-revision"),
+    mesh_topology: Optional[str] = typer.Option(
+        None, "--mesh", help="Device topology / MESH_DEVICE (e.g. P150, N300, 1x4)."
+    ),
+    device_count: int = typer.Option(1, "--device-count", help="Number of devices the model uses."),
+    env: Optional[List[str]] = typer.Option(
+        None, "--env", help="KEY=VALUE serving env, overlaid at run time (repeatable)."
+    ),
+    firmware_min: Optional[str] = typer.Option(None, "--firmware-min", help="Minimum card firmware/driver version."),
+    out: Optional[str] = typer.Option(
+        None, "--out", help="Stage the running folder here (kept even without a push target)."
+    ),
+    private: bool = typer.Option(True, "--private/--public", help="Repo visibility when pushing."),
+    publish: bool = typer.Option(False, "--publish", help="List in the community catalog (requires --public)."),
+) -> None:
+    """Package what's on your box into ONE self-contained (v5) bundle and (optionally) push it.
+
+    Snapshots your *built* artifacts — your ttnn wheel (custom C++/LLK kernels compiled in), the
+    empty-target base vLLM wheel, the vLLM plugin wheel — plus your modified tt-metal-community
+    tree, and writes a generated ``install.sh``/``run.sh`` + a v5 manifest. Weights are a POINTER
+    (the HF repo id in ``--weights``), never embedded. A consumer then needs only a TT card +
+    firmware: ``tt-kernel pull`` installs the wheels + weights, ``tt-kernel serve`` runs it.
+    """
+    if publish and private:
+        raise _err("--publish requires --public (a catalog listing is public by definition).")
+    if repo_id is None and not out:
+        raise _err("Nothing to do: pass a target repo_id to push, or --out to stage locally.")
+
+    metal_dir = Path(from_metal).expanduser()
+    if not metal_dir.is_dir():
+        raise _err(f"--from-metal {from_metal!r} is not a directory.")
+
+    # Resolve wheels: --wheels-dir auto-classify, then explicit flags override.
+    picked = {"ttnn": None, "vllm": None, "plugin": None, "extra": []}
+    if wheels_dir:
+        wd = Path(wheels_dir).expanduser()
+        if not wd.is_dir():
+            raise _err(f"--wheels-dir {wheels_dir!r} is not a directory.")
+        picked = _classify_wheels(wd)
+    if ttnn_wheel:
+        picked["ttnn"] = Path(ttnn_wheel).expanduser()
+    if vllm_wheel:
+        picked["vllm"] = Path(vllm_wheel).expanduser()
+    if plugin_wheel:
+        picked["plugin"] = Path(plugin_wheel).expanduser()
+    if extra_wheel:
+        picked["extra"] = [Path(p).expanduser() for p in extra_wheel]
+
+    if not picked["ttnn"]:
+        raise _err("No ttnn wheel found. Pass --ttnn-wheel <path> (your built engine wheel with "
+                   "your kernels), or --wheels-dir <dir> containing a ttnn-*.whl.")
+    for label, p in (("ttnn", picked["ttnn"]), ("vllm", picked["vllm"]), ("plugin", picked["plugin"])):
+        if p is not None and not p.is_file():
+            raise _err(f"{label} wheel {str(p)!r} does not exist.")
+
+    # vllm_metadata: an authored file, or synthesized from --arch-name/--main-class.
+    if metadata:
+        vmeta = json.loads(Path(metadata).expanduser().read_text())
+        if not vmeta.get("arch") or not vmeta.get("main_class"):
+            raise _err(f"{metadata} must set both 'arch' and 'main_class'.")
+    elif arch_name and main_class:
+        vmeta = {"arch": arch_name, "main_class": main_class}
+    else:
+        raise _err("Provide the serving entrypoint: --metadata <vllm_metadata.json>, or both "
+                   "--arch-name and --main-class.")
+
+    # TT arch (for the compiled-kernel gate) — explicit or detected.
+    resolved_arch = arch or metal.detect_device(arch_override=arch).arch
+    if not resolved_arch:
+        raise _err("Could not detect arch. Pass --arch (blackhole | wormhole_b0 | ...).")
+
+    weights_block = WeightsRef(repo_id=weights, revision=weights_revision) if weights else None
+    env_map: dict = {}
+    for kv in env or []:
+        if "=" not in kv:
+            raise _err(f"--env expects KEY=VALUE, got {kv!r}.")
+        k, v = kv.split("=", 1)
+        env_map[k] = v
+    mesh = Mesh(devices=device_count, topology=mesh_topology) if mesh_topology else None
+    bundle_name = name or (repo_id.split("/")[-1] if repo_id else metal_dir.name)
+
+    def _stage(staged: Path) -> Manifest:
+        return packaging.stage_package(
+            staged,
+            name=bundle_name,
+            arch=resolved_arch,
+            ttnn_wheel=picked["ttnn"],
+            vllm_wheel=picked["vllm"],
+            plugin_wheel=picked["plugin"],
+            extra_wheels=picked["extra"],
+            metal_dir=metal_dir,
+            vllm_metadata=vmeta,
+            tt_kernel_version=__version__,
+            weights=weights_block,
+            device_count=device_count,
+            mesh=mesh,
+            env=env_map,
+            tt_metal_version=metal.resolve_version() or "unknown",
+            firmware_min=firmware_min,
+        )
+
+    def _report(m: Manifest, where: Path) -> None:
+        typer.secho(f"✓ Staged self-contained bundle {m.name} at {where}", fg=typer.colors.GREEN)
+        typer.echo(f"  wheels: {', '.join(Path(w.path).name for w in m.bundled.wheels)}")
+        typer.echo(f"  arch registration: {m.entrypoint.arch_name}  ->  {m.entrypoint.cls}")
+        if m.weights:
+            typer.echo(f"  weights (pointer): {m.weights.repo_id}")
+
+    if out:
+        upload_from = Path(out).expanduser()
+        if upload_from.exists():
+            shutil.rmtree(upload_from)
+    else:
+        upload_from = Path(tempfile.mkdtemp(prefix="tt-kernel-pkg-")) / "bundle"
+    manifest = _stage(upload_from)
+    _report(manifest, upload_from)
+    if repo_id is None:
+        typer.secho("  (no push target — staged only)", fg=typer.colors.CYAN)
+        return
+
+    # Push (git-LFS handles the large wheels automatically).
+    tags = [TT_KERNEL_TAG, manifest.arch, "vllm", "self-contained"]
+    if mesh_topology:
+        tags.append(mesh_topology.lower())
+    if publish:
+        tags.append(TT_KERNEL_CATALOG_TAG)
+    typer.echo(f"Creating repo {repo_id} (private={private})")
+    hub.create_repo(repo_id, private=private)
+    hub.set_visibility(repo_id, private=private)
+    total_mb = sum(w.size for w in manifest.bundled.wheels) / 1e6
+    typer.echo(f"Uploading bundle (~{total_mb:.0f} MB of wheels via LFS) ...")
+    hub.push_folder(repo_id, upload_from, commit_message=f"tt-kernel package {manifest.name} (self-contained)")
+    try:
+        hub.tag_repo(repo_id, tags)
+    except Exception as exc:  # tagging is best-effort
+        typer.secho(f"  (could not write tags: {exc})", fg=typer.colors.YELLOW)
+    typer.secho(f"✓ Pushed self-contained bundle {repo_id}", fg=typer.colors.GREEN)
+    typer.secho(f"  Anyone: tt-kernel pull {repo_id} && tt-kernel serve {repo_id}", fg=typer.colors.CYAN)
 
 
 # ---------------------------------------------------------------------------- pull
