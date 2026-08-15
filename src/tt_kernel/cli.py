@@ -759,6 +759,15 @@ def pull(
             raise _err(f"{repo_id} is not a tt-kernel bundle (no {MANIFEST_NAME}).")
         manifest = Manifest.from_json(manifest_path.read_text())
 
+        # v5 self-contained ("fat") bundle: ships its own ttnn/vLLM/plugin wheels. Install the
+        # platform into the bundle's own venv — no host tt-metal/vLLM needed — then return.
+        if manifest.is_self_contained:
+            _install_self_contained(
+                repo_id, snapshot, manifest, force=force, arch=arch,
+                models_dir=models_dir, with_weights=with_weights and not no_weights,
+            )
+            return
+
         # vLLM bundles carry no kernel cache: install the model folder into bundles_dir
         # instead of the tt-metal cache, then return.
         if manifest.runner and manifest.runner.is_vllm:
@@ -1017,6 +1026,91 @@ def _select_instance(manifest, *, arch, instance_override, force):
     base.vllm_version = v.vllm or base.vllm_version
     base.vllm_plugin_version = v.plugin or base.vllm_plugin_version
     return chosen, base
+
+
+def _install_self_contained(
+    repo_id, snapshot, manifest, *, force, arch, models_dir, with_weights,
+) -> None:
+    """Install a v5 self-contained bundle: materialize it, build its own venv, (optionally) weights.
+
+    The consumer needs only a TT card + firmware — the shipped wheels ARE the platform. We copy the
+    pulled folder to a persistent install dir, run its ``install.sh`` (venv + wheels + deps), and
+    record it so ``serve`` runs from that venv. No host tt-metal/vLLM is required or touched.
+    """
+    env = metal.local_env(arch_override=arch, probe=False)
+    report = compare(manifest, env)
+    _print_report(report)
+    if report.has_fatal:
+        raise _err("Refusing to install: fatal incompatibility (see above).")
+    if report.issues and not force:
+        raise _err("Refusing to install: re-run with --force to override the warnings above.")
+
+    # The shipped wheels are the author's build (cp312/linux_x86_64), not universal.
+    bad = packaging.host_incompatible_wheels(manifest.bundled)
+    if bad:
+        for b in bad:
+            typer.secho(f"  ! {b}", fg=typer.colors.YELLOW)
+        if not force:
+            raise _err("Shipped wheel(s) not built for this interpreter/platform; "
+                       "--force to attempt anyway (likely to fail at pip install).")
+
+    dest = runtime.resolve_models_dir(models_dir, repo_id)
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(snapshot, dest)
+
+    typer.echo("Installing shipped wheels + deps into a fresh venv (downloads torch/deps) ...")
+    try:
+        venv_python = runtime.install_self_contained(dest, dest / "venv")
+    except subprocess.CalledProcessError as exc:
+        raise _err(f"install.sh failed (exit {exc.returncode}). See output above.")
+    except FileNotFoundError as exc:
+        raise _err(str(exc))
+
+    weights_path: Optional[Path] = None
+    if with_weights and manifest.weights:
+        typer.echo(f"Downloading weights {manifest.weights.repo_id} ...")
+        weights_path = runtime.download_weights(manifest.weights, dest / "weights")
+
+    run_script = dest / (manifest.bundled.run_script or "run.sh")
+    localdb.record(repo_id, {
+        "repo_id": repo_id,
+        "self_contained": True,
+        "install_dir": str(dest),
+        "bundle_path": str(dest),  # holds vllm_metadata.json (== EXTRA_MODELS_DIR entry)
+        "python": str(venv_python),
+        "run_script": str(run_script),
+        "arch": manifest.arch,
+        "weights": manifest.weights.repo_id if manifest.weights else None,
+        "weights_path": str(weights_path) if weights_path else None,
+    })
+    typer.secho(f"✓ installed self-contained bundle -> {dest}", fg=typer.colors.GREEN)
+    if not weights_path and manifest.weights:
+        typer.secho(f"  (weights fetched at serve time from {manifest.weights.repo_id}; "
+                    "pass --with-weights to pre-download)", fg=typer.colors.CYAN)
+    typer.secho(f"  Serve:  tt-kernel serve {repo_id}", fg=typer.colors.CYAN)
+
+
+def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional[List[str]] = None) -> None:
+    """Serve a v5 self-contained bundle by running its own ``run.sh`` in its own venv.
+
+    ``run.sh`` wires the engine env (LD_PRELOAD of _ttnncpp.so, TT_METAL_HOME, EXTRA_MODELS_DIR,
+    fabric-off) and launches the OpenAI server from the bundle's venv — no host stack involved.
+    """
+    run_script = entry.get("run_script")
+    if not run_script or not Path(run_script).is_file():
+        raise _err(f"Self-contained bundle for {entry.get('repo_id')} is missing its run.sh "
+                   f"({run_script}). Re-run `tt-kernel pull {entry.get('repo_id')}`.")
+    argv = ["bash", str(run_script), *(extra_args or [])]
+    typer.secho(f"[vLLM self-contained: {entry.get('repo_id')} via {run_script}]", fg=typer.colors.CYAN)
+    if print_only:
+        typer.echo(" ".join(argv))
+        return
+    try:
+        raise typer.Exit(code=subprocess.run(argv).returncode)
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130)
 
 
 def _install_vllm_bundle(
@@ -1508,6 +1602,30 @@ def serve(
     """
     _warn_toolchain()
     repo_id, revision = _split_revision(repo_id)
+
+    # Self-contained (v5) fast path: an already-installed bundle serves from its own venv.
+    entry = localdb.get(repo_id)
+    if entry and entry.get("self_contained"):
+        _serve_self_contained(entry, print_only=print_only)
+        return
+    # Not installed yet: if the remote bundle is self-contained, install then serve it (unless
+    # --local-only). A self-contained bundle never routes through the host-provisioned vLLM path.
+    if not local_only:
+        try:
+            remote = hub.fetch_manifest(repo_id, revision)
+        except Exception:  # noqa: BLE001 — fall back to the normal path if we can't peek
+            remote = None
+        if remote is not None and remote.is_self_contained:
+            with tempfile.TemporaryDirectory() as td:
+                snapshot = hub.download_bundle(repo_id, revision, dest=td)
+                mani = Manifest.from_json((snapshot / MANIFEST_NAME).read_text())
+                _install_self_contained(repo_id, snapshot, mani, force=force, arch=arch,
+                                        models_dir=None, with_weights=False)
+            entry = localdb.get(repo_id)
+            if entry and entry.get("self_contained"):
+                _serve_self_contained(entry, print_only=print_only)
+                return
+
     _serve_vllm(repo_id, revision, print_only=print_only, local_only=local_only,
                 arch=arch, bundles_dir=bundles_dir, do_health=health_check,
                 force=force, instance=instance)

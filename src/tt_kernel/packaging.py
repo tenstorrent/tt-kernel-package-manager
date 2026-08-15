@@ -53,6 +53,36 @@ _PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 _WHEEL_RE = re.compile(r"^(?P<dist>.+?)-(?P<ver>[^-]+)(-\d[^-]*)?-(?P<py>[^-]+)-(?P<abi>[^-]+)-(?P<plat>[^-]+)\.whl$")
 
 
+def host_python_tag() -> str:
+    """This interpreter's CPython wheel tag, e.g. ``cp312``."""
+    import sys
+
+    return f"cp{sys.version_info.major}{sys.version_info.minor}"
+
+
+def host_incompatible_wheels(bundled: "BundledPlatform") -> List[str]:  # noqa: F821
+    """Shipped wheels whose interpreter/platform tags don't match this host.
+
+    The shipped wheels are the author's build (e.g. cp312/linux_x86_64), NOT universal — a
+    consumer on a different Python minor or OS can't install them. Universal wheels
+    (``py3-none-any`` like the plugin) are skipped. Returns human-readable reasons; empty ==
+    all installable here.
+    """
+    import sys
+
+    problems: List[str] = []
+    host_py = host_python_tag()
+    host_is_linux = sys.platform.startswith("linux")
+    for w in bundled.wheels:
+        if not w.python_tag or w.python_tag.startswith("py") or w.abi_tag in (None, "none"):
+            continue  # universal / non-CPython-pinned wheel
+        if w.python_tag != host_py:
+            problems.append(f"{Path(w.path).name}: built for {w.python_tag}, host is {host_py}")
+        if w.platform_tag and w.platform_tag != "any" and "linux" in w.platform_tag and not host_is_linux:
+            problems.append(f"{Path(w.path).name}: built for {w.platform_tag}, host is {sys.platform}")
+    return problems
+
+
 def sha256_file(path: Path, _chunk: int = 1 << 20) -> str:
     """Streaming sha256 of a file (wheels are large — don't slurp)."""
     h = hashlib.sha256()
@@ -255,6 +285,8 @@ __all__ = [
     "sha256_file",
     "parse_wheel_tags",
     "make_wheel_artifact",
+    "host_python_tag",
+    "host_incompatible_wheels",
     "render_install_sh",
     "render_run_sh",
     "stage_package",

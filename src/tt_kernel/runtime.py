@@ -178,6 +178,22 @@ def serve_command(runner_spec: str, weights_path: Path) -> str:
     return " ".join(serve_argv(str(weights_path), runner_spec=runner_spec))
 
 
+# ----------------------------------------------------------------- self-contained
+def install_self_contained(bundle_dir: Path, venv_dir: Path) -> Path:
+    """Run a v5 self-contained bundle's ``install.sh`` to build its own venv.
+
+    The generated ``install.sh`` creates ``venv_dir``, pip-installs the shipped wheels
+    (ttnn with the author's kernels + base vLLM + plugin), then the deps from
+    ``requirements.txt``. Returns the venv's python. Raises CalledProcessError on failure.
+    This is the "install the platform" step that makes a package need only a card + firmware.
+    """
+    script = bundle_dir / "install.sh"
+    if not script.is_file():
+        raise FileNotFoundError(f"{script} not found (not a self-contained bundle).")
+    subprocess.run(["bash", str(script), str(venv_dir)], check=True)
+    return venv_dir / "bin" / "python"
+
+
 # --------------------------------------------------------------------------- vLLM
 def vllm_available(python: Optional[str] = None) -> bool:
     """Whether the Tenstorrent vLLM serving stack (vLLM + the plugin) is importable.
