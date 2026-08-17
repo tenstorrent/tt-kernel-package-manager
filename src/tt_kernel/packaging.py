@@ -34,6 +34,7 @@ from .manifest import (
     Manifest,
     Mesh,
     Producer,
+    Resources,
     WeightsRef,
     WheelArtifact,
 )
@@ -44,6 +45,9 @@ METAL_DIR = "metal"
 INSTALL_SCRIPT = "install.sh"
 RUN_SCRIPT = "run.sh"
 REQUIREMENTS = "requirements.txt"
+# Per-model vLLM bundle folders live under here; this dir (not the bundle root) is EXTRA_MODELS_DIR
+# so the plugin's child-scan finds exactly the model metadata and not metal/, wheels/, venv/.
+METADATA_DIR = "vllm_models"
 
 # torch is the CPU build for Tenstorrent (never CUDA); requirements install uses this index.
 _PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
@@ -154,6 +158,19 @@ def render_run_sh(manifest: Manifest) -> str:
     extra_env = "".join(
         f'export {k}="{v}"\n' for k, v in (manifest.env or {}).items()
     )
+    # The tt_transformers adapter reads HF_MODEL from the env (not vLLM's --model), so export it.
+    hf_export = f'export HF_MODEL="${{HF_MODEL:-{weights}}}"\n' if weights else ""
+    # The TT vLLM backend REQUIRES a supported batch size and a concrete block_size (its default
+    # of 256 / None both fail), so always emit them — from the manifest's resources, with the
+    # known-good tt_transformers defaults when unset.
+    res = manifest.resources
+    max_num_seqs = (res.max_num_seqs if res and res.max_num_seqs else 32)
+    block_size = (res.block_size if res and res.block_size else 64)
+    serving = f"--max_num_seqs {max_num_seqs} --block_size {block_size}"
+    if res and res.max_model_len:
+        serving += f" --max_model_len {res.max_model_len}"
+    if res and res.extra_args:
+        serving += " " + " ".join(str(a) for a in res.extra_args)
     return f"""#!/usr/bin/env bash
 # Serve this model on TT hardware. Assumes ./{INSTALL_SCRIPT} has been run.
 set -euo pipefail
@@ -166,13 +183,15 @@ PYBIN="$VENV/bin/python"
 TTNN_DIR="$("$PYBIN" -c 'import importlib.util,os;print(os.path.dirname(importlib.util.find_spec("ttnn").origin))')"
 export LD_PRELOAD="$TTNN_DIR/build/lib/_ttnncpp.so"   # glibc static-TLS workaround
 export TT_METAL_HOME="$TTNN_DIR"
-export EXTRA_MODELS_DIR="$HERE"                        # holds vllm_metadata.json
+# EXTRA_MODELS_DIR is a PARENT of per-model bundle folders; the plugin scans its children for
+# each vllm_metadata.json (so the metadata lives in {METADATA_DIR}/<model>/, not the bundle root).
+export EXTRA_MODELS_DIR="$HERE/{METADATA_DIR}"
 export TT_VLLM_BUILTIN_MODELS=0
 export VLLM_PLUGINS=tt,tt_model_registry
-export PYTHONPATH="$HERE/{METAL_DIR}:${{PYTHONPATH:-}}"
+export PYTHONPATH="$HERE/{METAL_DIR}:${{PYTHONPATH:-}}"   # resolves the adapter's models.* imports
 export MESH_DEVICE="${{MESH_DEVICE:-{mesh_device}}}"
 export TT_METAL_VISIBLE_DEVICES="${{TT_METAL_VISIBLE_DEVICES:-0}}"
-{extra_env}exec "$PYBIN" -m vllm.entrypoints.openai.api_server --model "{weights}" "$@"
+{hf_export}{extra_env}exec "$PYBIN" -m vllm.entrypoints.openai.api_server --model "{weights}" {serving} "$@"
 """
 
 
@@ -192,6 +211,7 @@ def stage_package(
     device_count: int = 1,
     mesh: Optional[Mesh] = None,
     env: Optional[Dict[str, str]] = None,
+    resources: Optional[Resources] = None,
     tt_metal_version: str = "unknown",
     firmware_min: Optional[str] = None,
 ) -> Manifest:
@@ -233,8 +253,13 @@ def stage_package(
     else:
         (staged / REQUIREMENTS).write_text("# add pip deps here (torch is installed CPU-only)\n")
 
-    # The EXTRA_MODELS_DIR plugin contract lives at the folder root.
-    (staged / bundles.VLLM_METADATA_NAME).write_text(json.dumps(vllm_metadata, indent=2))
+    # The plugin's EXTRA_MODELS_DIR contract: it scans the *children* of EXTRA_MODELS_DIR for a
+    # vllm_metadata.json in each. So the metadata goes in a per-model SUBFOLDER under METADATA_DIR
+    # (which run.sh points EXTRA_MODELS_DIR at) — NOT the bundle root, where it would be missed.
+    safe_key = name.replace("/", "__")
+    model_bundle = staged / METADATA_DIR / safe_key
+    model_bundle.mkdir(parents=True, exist_ok=True)
+    (model_bundle / bundles.VLLM_METADATA_NAME).write_text(json.dumps(vllm_metadata, indent=2))
 
     bundled = BundledPlatform(
         ttnn_wheel=ttnn_art,
@@ -268,6 +293,7 @@ def stage_package(
         entrypoint=entrypoint,
         mesh=mesh,
         env=env or {},
+        resources=resources,
         bundled=bundled,
     )
 

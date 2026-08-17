@@ -67,13 +67,20 @@ def test_stage_package_layout(tmp_path):
     assert (staged / "metal" / "models" / "tt_transformers" / "tt" / "attention.py").is_file()
     assert not (staged / "metal" / "__pycache__").exists()  # ignored
     assert (staged / "requirements.txt").read_text().startswith("torch==2.11.0")
-    assert (staged / "vllm_metadata.json").is_file()
-    assert json.loads((staged / "vllm_metadata.json").read_text())["arch"] == "LlamaForCausalLM"
+    # vllm_metadata.json lives in a per-model SUBFOLDER under vllm_models/ (EXTRA_MODELS_DIR contract)
+    meta = staged / "vllm_models" / "llama-3.2-3b-tt" / "vllm_metadata.json"
+    assert meta.is_file()
+    assert json.loads(meta.read_text())["arch"] == "LlamaForCausalLM"
+    assert not (staged / "vllm_metadata.json").exists()  # NOT at the root (plugin would miss it)
     for s in ("install.sh", "run.sh"):
         assert (staged / s).stat().st_mode & 0o111  # executable
-    # run.sh wired the non-obvious env
+    # run.sh wired the non-obvious env + serving args the TT backend requires
     run = (staged / "run.sh").read_text()
-    assert "_ttnncpp.so" in run and "EXTRA_MODELS_DIR" in run and "TT_VLLM_BUILTIN_MODELS=0" in run
+    assert "_ttnncpp.so" in run and "TT_VLLM_BUILTIN_MODELS=0" in run
+    assert 'EXTRA_MODELS_DIR="$HERE/vllm_models"' in run
+    assert "find_spec" in run                      # ttnn located without importing it
+    assert 'export HF_MODEL=' in run               # adapter reads HF_MODEL from env
+    assert "--max_num_seqs 32" in run and "--block_size 64" in run  # TT backend defaults
     assert "unsloth/Llama-3.2-3B-Instruct" in run and "P150" in run
 
     # manifest

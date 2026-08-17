@@ -29,6 +29,7 @@ from .manifest import (
     Manifest,
     Mesh,
     Producer,
+    Resources,
     RunnerPayload,
     WeightsRef,
     compare,
@@ -573,6 +574,17 @@ def package(
         None, "--mesh", help="Device topology / MESH_DEVICE (e.g. P150, N300, 1x4)."
     ),
     device_count: int = typer.Option(1, "--device-count", help="Number of devices the model uses."),
+    max_num_seqs: Optional[int] = typer.Option(
+        None, "--max-num-seqs", help="vLLM max concurrent sequences (TT backend needs a supported "
+        "batch; defaults to 32 in the launcher if unset)."
+    ),
+    block_size: Optional[int] = typer.Option(
+        None, "--block-size", help="vLLM paged-attention block size (TT backend requires it; "
+        "defaults to 64 in the launcher if unset)."
+    ),
+    max_model_len: Optional[int] = typer.Option(
+        None, "--max-model-len", help="vLLM max context length (bounds KV-cache allocation)."
+    ),
     env: Optional[List[str]] = typer.Option(
         None, "--env", help="KEY=VALUE serving env, overlaid at run time (repeatable)."
     ),
@@ -647,6 +659,9 @@ def package(
         k, v = kv.split("=", 1)
         env_map[k] = v
     mesh = Mesh(devices=device_count, topology=mesh_topology) if mesh_topology else None
+    resources = Resources(
+        max_num_seqs=max_num_seqs, block_size=block_size, max_model_len=max_model_len
+    ) if (max_num_seqs or block_size or max_model_len) else None
     bundle_name = name or (repo_id.split("/")[-1] if repo_id else metal_dir.name)
 
     def _stage(staged: Path) -> Manifest:
@@ -665,6 +680,7 @@ def package(
             device_count=device_count,
             mesh=mesh,
             env=env_map,
+            resources=resources,
             tt_metal_version=metal.resolve_version() or "unknown",
             firmware_min=firmware_min,
         )
