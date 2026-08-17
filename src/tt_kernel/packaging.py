@@ -161,7 +161,9 @@ HERE="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 VENV="${{VENV:-$HERE/venv}}"
 PYBIN="$VENV/bin/python"
 
-TTNN_DIR="$("$PYBIN" -c 'import ttnn,os;print(os.path.dirname(ttnn.__file__))')"
+# Locate ttnn WITHOUT importing it — importing loads _ttnn.so, which is exactly what needs the
+# LD_PRELOAD below (chicken-and-egg). find_spec resolves the path without executing the module.
+TTNN_DIR="$("$PYBIN" -c 'import importlib.util,os;print(os.path.dirname(importlib.util.find_spec("ttnn").origin))')"
 export LD_PRELOAD="$TTNN_DIR/build/lib/_ttnncpp.so"   # glibc static-TLS workaround
 export TT_METAL_HOME="$TTNN_DIR"
 export EXTRA_MODELS_DIR="$HERE"                        # holds vllm_metadata.json
