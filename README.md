@@ -128,6 +128,19 @@ The plugin auto-registers every bundle it finds under `EXTRA_MODELS_DIR`, so no 
 to the plugin is required. `vllm_metadata.json` is owned by the plugin; `tt-kernel` ships it
 verbatim and reads only the architecture and the per-machine launch command.
 
+### Repo visibility
+
+`--private` / `--public` is tri-state, and **a push never changes visibility on its own**:
+
+| you run | new repo | repo that already exists |
+|---|---|---|
+| `push repo` (no flag) | created **public** | visibility **left exactly as it is** |
+| `push repo --private` | created private | made private, and the change is reported |
+| `push repo --public` | created public | made public, and the change is reported |
+
+So re-pushing an update to a private repo cannot publish it by omission, and `--publish` on an
+existing private repo asks you for `--public` rather than flipping it for you.
+
 ## Kernel-cache bundles (kernels + runner + weights, legacy dispatch path)
 
 > **Legacy.** This path serves through the older dispatch runtime (`tt_api.serve`), not vLLM.
@@ -206,8 +219,10 @@ tt-kernel publish   you/mymodel-blackhole                  # list a repo pushed 
 tt-kernel unpublish you/mymodel-blackhole                  # delist (repo untouched)
 ```
 
-`--publish` requires `--public` and adds the `tt-kernel-catalog` tag; the catalog shows only
-repos carrying it. Deploy the front end by copying `web/` to any static server — no backend,
+`--publish` requires a public repo and adds the `tt-kernel-catalog` tag; the catalog shows only
+repos carrying it. On a repo that already exists and is private, `--publish` fails and asks for
+an explicit `--public` — it will not change visibility for you (see
+[Repo visibility](#repo-visibility)). Deploy the front end by copying `web/` to any static server — no backend,
 no build step. See **[web/README.md](web/README.md)**.
 
 ## Checking your toolchain
