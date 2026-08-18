@@ -2,6 +2,8 @@
 
 We welcome contributions to tt-kernel! This document provides guidelines for contributing to the project.
 
+> **Automated / agent contributors (e.g. Claude Code):** read [AGENTS.md](AGENTS.md) for the binding design invariants, testing requirements, and PR discipline before opening a fix.
+
 ## Reporting Bugs
 
 If you discover a bug, please report it via [GitHub Issues](https://github.com/tenstorrent/tt-kernel-package-manager/issues).
