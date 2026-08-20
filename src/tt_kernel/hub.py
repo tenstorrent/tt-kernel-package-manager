@@ -61,13 +61,19 @@ def set_visibility(repo_id: str, private: bool) -> None:
 
 
 def push_folder(repo_id: str, folder: Path, commit_message: str) -> None:
-    """Upload an entire staged bundle folder. Large binaries go to LFS automatically."""
-    _api().upload_folder(
-        repo_id=repo_id,
-        repo_type=_REPO_TYPE,
-        folder_path=str(folder),
-        commit_message=commit_message,
-    )
+    """Upload an entire staged bundle folder. Large binaries go to LFS automatically.
+
+    ``upload_folder`` takes no ``tqdm_class``, so the bridge here silences HF's writers and
+    shows an indeterminate activity line rather than a byte count. An honest spinner beats
+    a bar fighting our own output for the row.
+    """
+    with progress_bridge(f"Uploading to {repo_id}"):
+        _api().upload_folder(
+            repo_id=repo_id,
+            repo_type=_REPO_TYPE,
+            folder_path=str(folder),
+            commit_message=commit_message,
+        )
 
 
 def tag_repo(repo_id: str, tags: List[str]) -> None:
@@ -126,12 +132,18 @@ def is_private_safe(repo_id: str) -> Optional[bool]:
 
 
 def download_bundle(repo_id: str, revision: Optional[str], dest: Optional[str] = None) -> Path:
-    """Snapshot-download a bundle and return the local snapshot path."""
+    """Snapshot-download a bundle and return the local snapshot path.
+
+    HF's own tqdm/xet bars are diverted into our activity row (see ``progress_bridge``) so
+    only one writer ever owns the terminal.
+    """
     from huggingface_hub import snapshot_download
 
-    path = snapshot_download(
-        repo_id=repo_id, repo_type=_REPO_TYPE, revision=revision, local_dir=dest
-    )
+    with progress_bridge(f"Downloading {repo_id}") as tqdm_class:
+        path = snapshot_download(
+            repo_id=repo_id, repo_type=_REPO_TYPE, revision=revision, local_dir=dest,
+            tqdm_class=tqdm_class,
+        )
     return Path(path)
 
 
@@ -139,9 +151,10 @@ def fetch_manifest(repo_id: str, revision: Optional[str]) -> Manifest:
     """Download just the manifest file and parse it (used by ``info``)."""
     from huggingface_hub import hf_hub_download
 
-    path = hf_hub_download(
-        repo_id=repo_id, repo_type=_REPO_TYPE, filename=MANIFEST_NAME, revision=revision
-    )
+    with progress_bridge(f"Fetching manifest for {repo_id}"):
+        path = hf_hub_download(
+            repo_id=repo_id, repo_type=_REPO_TYPE, filename=MANIFEST_NAME, revision=revision
+        )
     return Manifest.from_json(Path(path).read_text())
 
 
@@ -270,3 +283,120 @@ def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
         "evidence": _evidence(text),
         "actions": ["re-run with --verbose for the full traceback"],
     }
+
+
+# ----------------------------------------------------------------- progress bridge
+# huggingface_hub writes its own tqdm bars, and hf_xet writes more ("Download complete",
+# "Reconstruction complete"). With our spinner or a `secho` also writing, two processes
+# fought for one terminal row: bars and status text interleaved mid-line, and unterminated
+# bar output survived the process and painted over the next shell prompt — at which point
+# leftover bytes were handed to bash as commands. So the CLI takes sole ownership of the
+# row: HF's writers are silenced and their byte counts are re-reported through our own
+# activity line.
+class _ActivityTqdm:
+    """A tqdm stand-in that reports into ``console.activity`` instead of the terminal.
+
+    huggingface_hub instantiates whatever ``tqdm_class`` it is handed, so implementing the
+    slice it actually uses (init / update / close / context manager, plus the ``total`` and
+    ``n`` attributes it reads back) is enough to divert the whole download's progress into
+    one line we control.
+    """
+
+    label = "Working"
+    _live = {}  # id -> (n, total), so concurrent file bars can be summed
+
+    def __init__(self, *args, **kwargs):
+        from . import console
+
+        self._console = console
+        self.total = kwargs.get("total")
+        self.n = kwargs.get("initial", 0) or 0
+        self.desc = kwargs.get("desc") or ""
+        self.unit = kwargs.get("unit", "")
+        self._key = id(self)
+        # Only byte-denominated bars are worth aggregating; a "Fetching 5 files" bar has a
+        # different unit and would corrupt the byte total.
+        self._bytes = self.unit in ("B", "iB")
+        if self._bytes:
+            _ActivityTqdm._live[self._key] = (self.n, self.total or 0)
+            self._render()
+
+    # -- the tqdm surface huggingface_hub touches ---------------------------------
+    def update(self, n=1):
+        self.n += n or 0
+        if self._bytes:
+            _ActivityTqdm._live[self._key] = (self.n, self.total or 0)
+            self._render()
+
+    def close(self):
+        _ActivityTqdm._live.pop(self._key, None)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+    def set_description(self, desc=None, refresh=True):
+        self.desc = desc or ""
+
+    def set_description_str(self, desc=None, refresh=True):
+        self.desc = desc or ""
+
+    def set_postfix(self, *a, **k):
+        pass
+
+    def set_postfix_str(self, *a, **k):
+        pass
+
+    def refresh(self, *a, **k):
+        pass
+
+    def reset(self, total=None):
+        self.n = 0
+        self.total = total
+
+    def write(self, s, **k):
+        pass  # tqdm.write() is a terminal escape hatch; we own the terminal here
+
+    def __iter__(self):
+        return iter(())
+
+    @classmethod
+    def _render(cls):
+        done = sum(n for n, _ in cls._live.values())
+        if not done:
+            return
+        from . import console
+
+        console.activity.set(f"{cls.label}  {console.fmt_bytes(done)}")
+
+
+def progress_bridge(label: str):
+    """Silence HF/xet progress writers and route their byte counts to the activity row.
+
+    Returns a ``tqdm_class`` to hand to ``snapshot_download``. Use as a context manager so
+    the bars are restored on every exit path — leaving them disabled would silently strip
+    progress from anything else in the process.
+    """
+    import contextlib
+
+    from huggingface_hub.utils import disable_progress_bars, enable_progress_bars
+
+    from . import console
+
+    @contextlib.contextmanager
+    def _ctx():
+        _ActivityTqdm.label = label
+        _ActivityTqdm._live.clear()
+        disable_progress_bars()
+        console.activity.start(label)
+        try:
+            yield _ActivityTqdm
+        finally:
+            console.activity.stop()
+            enable_progress_bars()
+            _ActivityTqdm._live.clear()
+
+    return _ctx()

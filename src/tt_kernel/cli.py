@@ -69,6 +69,7 @@ def _version_cb(value: bool) -> None:
 
 @app.callback()
 def _main(
+    ctx: typer.Context,
     verbose: bool = typer.Option(
         False, "--verbose", "-v",
         help="Show full per-step output instead of the collapsed summary (and restore tracebacks).",
@@ -83,6 +84,11 @@ def _main(
     console.set_verbose(verbose)
     if no_color:
         console.set_no_color(True)
+        # Click styles independently of our console module, and every not-yet-converted
+        # `typer.secho` goes through it. ctx.color is the documented way to force it off
+        # on a TTY (NO_COLOR alone does not reach click's resolve_color_default).
+        ctx.color = False
+        os.environ.setdefault("NO_COLOR", "1")
 
 
 def _err(msg: str) -> "typer.Exit":
