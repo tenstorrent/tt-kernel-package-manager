@@ -152,10 +152,35 @@ def test_render_composes_launch_command():
     assert cmd[:4] == ["python3", "server_example_tt.py", "--model", "poolside/Laguna-XS-2.1"]
     for flag, val in [("--max_model_len", "131072"), ("--max_num_seqs", "8"),
                       ("--block_size", "64"), ("--trace_region_size", "1500000000"),
-                      ("--tool_parser", "poolside_v1"), ("--reasoning_parser", "poolside_v1")]:
+                      ("--tool-call-parser", "poolside_v1"),
+                      ("--reasoning_parser", "poolside_v1")]:
         assert cmd[cmd.index(flag) + 1] == val
+    # vLLM rejects --tool-call-parser unless auto tool choice is enabled alongside it.
+    assert "--enable-auto-tool-choice" in cmd
     env = md["launch"]["default"]["env"]
     assert env["VLLM_USE_V1"] == "1" and env["MESH_DEVICE"] == "P150"
+
+
+def test_render_tool_parser_uses_vllm_flag_names():
+    """``capabilities.tool_parser`` must render the flags vLLM actually accepts.
+
+    vLLM's parser normalizes underscores to dashes, so the old ``--tool_parser`` became
+    ``--tool-parser`` — not a vLLM flag — and the server refused to start. The real flag is
+    ``--tool-call-parser``, and vLLM additionally requires ``--enable-auto-tool-choice``
+    beside it. Verified against vllm 0.24 serving Qwen3-Coder with ``qwen3_coder``.
+    """
+    m = _v4_manifest(capabilities=Capabilities(tool_parser="qwen3_coder"))
+    cmd = bundles.render_vllm_metadata(m)["launch"]["default"]["command"]
+    assert "--tool_parser" not in cmd and "--tool-parser" not in cmd
+    i = cmd.index("--tool-call-parser")
+    assert cmd[i + 1] == "qwen3_coder"
+    assert cmd[i - 1] == "--enable-auto-tool-choice"
+
+
+def test_render_no_tool_flags_without_capability():
+    """No tool_parser declared => neither flag appears (auto-tool-choice alone is an error)."""
+    cmd = bundles.render_vllm_metadata(_v4_manifest())["launch"]["default"]["command"]
+    assert "--enable-auto-tool-choice" not in cmd and "--tool-call-parser" not in cmd
 
 
 def test_render_extra_args_appended_and_override_replaces():
@@ -269,7 +294,8 @@ def test_v4_push_pull_serve_roundtrip(monkeypatch, tmp_path):
     serve = runner.invoke(cli.app, ["serve", "acme/laguna", "--print", "--local-only"])
     assert serve.exit_code == 0, serve.output
     assert "server_example_tt.py" in serve.output
-    assert "--max_num_seqs 8" in serve.output and "--tool_parser poolside_v1" in serve.output
+    assert "--max_num_seqs 8" in serve.output
+    assert "--enable-auto-tool-choice --tool-call-parser poolside_v1" in serve.output
     assert "MESH_DEVICE=P150" in serve.output
 
 

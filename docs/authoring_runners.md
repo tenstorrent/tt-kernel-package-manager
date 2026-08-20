@@ -276,8 +276,9 @@ tt-model serve you/laguna                            # composes + launches the v
 
 **How the launch command is composed.** `tt-model` turns `resources`/`capabilities`/`env`
 into the `server_example_tt.py` launch command (underscore flags: `--max_model_len`,
-`--max_num_seqs`, `--block_size`, `--trace_region_size`, `--tool_parser`, `--reasoning_parser`)
-with `VLLM_USE_V1=1` plus your `env` overlaid. When the mapping doesn't cover something, use
+`--max_num_seqs`, `--block_size`, `--trace_region_size`, `--reasoning_parser`; a
+`tool_parser` renders as vLLM's dash-cased `--enable-auto-tool-choice --tool-call-parser
+<name>` pair, which is what vLLM accepts) with `VLLM_USE_V1=1` plus your `env` overlaid. When the mapping doesn't cover something, use
 the escape hatches under `resources`:
 
 - `"extra_args": ["--enable-prefix-caching"]` — appended to the composed command.
