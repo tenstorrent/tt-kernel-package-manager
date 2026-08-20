@@ -19,6 +19,7 @@ from typing import List, Optional
 
 import typer
 
+from . import console
 from . import MANIFEST_NAME, TT_MODEL_CATALOG_TAG, TT_MODEL_TAG, __version__
 from . import (
     auth, bundles, cache, compat, device, hub, instances, localdb, metal, packaging,
@@ -42,6 +43,11 @@ app = typer.Typer(
     help="Publish and pull precompiled tt-metal kernel caches over Hugging Face Hub.",
     no_args_is_help=True,
     add_completion=False,
+    # Typer enables these by default, which turned every unhandled exception into a
+    # ~60-line syntax-highlighted stack with source frames from httpx and
+    # huggingface_hub. A traceback is not a user-facing error message; the handlers
+    # below render a diagnosis card instead. `--verbose` puts the traceback back.
+    pretty_exceptions_enable=False,
 )
 
 # Sub-app for the tt-metal instance registry (the supply side of version resolution).
@@ -50,13 +56,70 @@ instances_app = typer.Typer(
     help="Discover, register, and inspect the tt-metal builds on this host.",
     no_args_is_help=True,
     add_completion=False,
+    pretty_exceptions_enable=False,
 )
 app.add_typer(instances_app)
+
+
+def _version_cb(value: bool) -> None:
+    if value:
+        console.raw(__version__)
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v",
+        help="Show full per-step output instead of the collapsed summary (and restore tracebacks).",
+    ),
+    no_color: bool = typer.Option(False, "--no-color", help="Disable colour and styling."),
+    version: bool = typer.Option(
+        False, "--version", callback=_version_cb, is_eager=True,
+        help="Print the tt-model version and exit.",
+    ),
+) -> None:
+    """Publish, pull, and serve precompiled tt-metal model bundles."""
+    console.set_verbose(verbose)
+    if no_color:
+        console.set_no_color(True)
 
 
 def _err(msg: str) -> "typer.Exit":
     typer.secho(msg, fg=typer.colors.RED, err=True)
     return typer.Exit(code=1)
+
+
+def _fail_card(name: str, diagnosis: dict, *, consequence: Optional[str] = None) -> "typer.Exit":
+    """Render a diagnosis dict as a card and return the Exit to raise.
+
+    Mirrors ``_err``'s contract (print, return an Exit) so call sites read the same, but
+    surfaces cause/evidence/consequence/next-steps instead of one red line. The diagnosis
+    itself is built by a pure classifier (e.g. ``hub.classify_hub_error``) so the wording
+    matrix is testable without a network.
+    """
+    console.console.print(
+        console.failure_card(name, diagnosis, consequence=consequence), style=None
+    )
+    return typer.Exit(code=1)
+
+
+def _hub(op, repo_id: str, *, what: str, consequence: Optional[str] = None):
+    """Run a Hub call, turning any failure into a diagnosis card instead of a traceback.
+
+    Every Hub entry point used to be unguarded, so a 404 escaped as a Rich stack — from
+    ``pull`` (download_bundle) and ``info`` (fetch_manifest) alike. Wrapping at the call
+    site rather than inside ``hub`` keeps that module free of CLI concerns and lets each
+    caller name what it was doing and whether the run can continue.
+    """
+    try:
+        return op()
+    except typer.Exit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 — classified and re-raised as an Exit
+        if console.is_verbose():
+            raise
+        raise _fail_card(what, hub.classify_hub_error(exc, repo_id), consequence=consequence)
 
 
 def _print_report(report: CompatibilityReport) -> None:
@@ -900,7 +963,9 @@ def pull(
     runner_ready = False  # runner is usable (installed, or reference that resolves)
     weights_path: Optional[Path] = None
     with tempfile.TemporaryDirectory() as td:
-        snapshot = hub.download_bundle(repo_id, revision, dest=td)
+        snapshot = _hub(lambda: hub.download_bundle(repo_id, revision, dest=td),
+                        repo_id, what="Pull",
+                        consequence="Nothing was installed.")
         manifest_path = snapshot / MANIFEST_NAME
         if not manifest_path.is_file():
             raise _err(f"{repo_id} is not a tt-model bundle (no {MANIFEST_NAME}).")
@@ -1616,7 +1681,9 @@ def _ensure_vllm_pulled(repo_id: str, revision: Optional[str], *, arch: Optional
     if entry and entry.get("bundle_path") and Path(entry["bundle_path"]).is_dir():
         return entry
     with tempfile.TemporaryDirectory() as td:
-        snapshot = hub.download_bundle(repo_id, revision, dest=td)
+        snapshot = _hub(lambda: hub.download_bundle(repo_id, revision, dest=td),
+                        repo_id, what="Pull",
+                        consequence="Nothing was installed.")
         mpath = snapshot / MANIFEST_NAME
         if not mpath.is_file():
             raise _err(f"{repo_id} is not a tt-model bundle (no {MANIFEST_NAME}).")
@@ -1773,7 +1840,9 @@ def serve(
             remote = None
         if remote is not None and remote.is_self_contained:
             with tempfile.TemporaryDirectory() as td:
-                snapshot = hub.download_bundle(repo_id, revision, dest=td)
+                snapshot = _hub(lambda: hub.download_bundle(repo_id, revision, dest=td),
+                                repo_id, what="Pull",
+                                consequence="Nothing was installed.")
                 mani = Manifest.from_json((snapshot / MANIFEST_NAME).read_text())
                 _install_self_contained(repo_id, snapshot, mani, force=force, arch=arch,
                                         models_dir=None, with_weights=False)
@@ -1862,8 +1931,9 @@ def info(
 ) -> None:
     """Print a bundle's manifest and its compatibility verdict vs the local env."""
     repo_id, revision = _split_revision(repo_id)
-    manifest = hub.fetch_manifest(repo_id, revision)
-    typer.echo(manifest.to_json())
+    manifest = _hub(lambda: hub.fetch_manifest(repo_id, revision), repo_id,
+                    what="Inspect")
+    console.raw(manifest.to_json())
     typer.echo("")
     report = compare(manifest, metal.local_env(arch_override=arch, probe=probe))
     _print_report(report)

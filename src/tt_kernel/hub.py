@@ -178,3 +178,95 @@ def search(
             }
         )
     return out
+
+
+# --------------------------------------------------------------------- diagnosis
+# Hub failures used to escape as a ~60-line Rich traceback (`tt-model pull <404>` and
+# `tt-model info <404>` both did). Classification lives here, as a PURE function, so the
+# 404/401/403/gated/offline matrix is unit-testable with no network and the CLI can render
+# one card instead of a stack.
+def _evidence(text: str) -> str:
+    """The first line of an exception, minus tracking noise.
+
+    huggingface_hub appends "(Request ID: Root=1-...;...)" to its HTTP errors. That is for
+    a support ticket, not for the person reading their terminal, and it crowds out the
+    part that matters.
+    """
+    line = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
+    return line.split(" (Request ID:")[0].strip()
+
+
+def classify_hub_error(exc: BaseException, repo_id: str) -> dict:
+    """Map a huggingface_hub exception to ``{cause, detail, evidence, actions}``.
+
+    Pure: exception in, dict out. Keys match what ``console.failure_card`` renders.
+
+    The 404 wording is deliberately two-sided. The Hub answers 404 for *both* "no such
+    repo" and "private repo you cannot see" — it will not distinguish them for an
+    unauthorised caller — so asserting "it does not exist" would be a guess that sends
+    the user down the wrong path half the time.
+    """
+    name = type(exc).__name__
+    text = str(exc)
+    low = text.lower()
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+
+    # Offline / DNS / TLS beats everything: an unreachable Hub also can't confirm a repo,
+    # and "you are offline" is the more useful half of that pair.
+    if (name in ("LocalEntryNotFoundError", "OfflineModeIsEnabled")
+            or any(k in low for k in ("no such host", "dial tcp", "i/o timeout",
+                                      "tls handshake", "connection refused",
+                                      "connection error", "max retries exceeded",
+                                      "temporary failure in name resolution"))):
+        return {
+            "cause": "cannot reach the Hub",
+            "detail": "The request never got a response — this looks like a network or DNS problem, "
+                      "not a missing bundle.",
+            "evidence": _evidence(text),
+            "actions": ["check your connection, then re-run",
+                        "HF_HUB_OFFLINE=1 tt-model list   # what is already installed"],
+        }
+
+    if status == 401 or name == "GatedRepoError" or "gated" in low:
+        return {
+            "cause": "you do not have access",
+            "detail": f"The Hub recognised {repo_id} but refused it for this token — it is gated, "
+                      "or the token is missing, expired, or lacks read scope.",
+            "evidence": _evidence(text),
+            "actions": ["tt-model login", f"accept the terms at https://huggingface.co/{repo_id}"],
+        }
+
+    if status == 403:
+        return {
+            "cause": "not authorised",
+            "detail": f"The Hub rejected this token for {repo_id}. It may lack read scope, or the "
+                      "repo's terms may not be accepted for your account.",
+            "evidence": _evidence(text),
+            "actions": ["tt-model login", f"open https://huggingface.co/{repo_id}"],
+        }
+
+    if status == 404 or name == "RepositoryNotFoundError" or "not found" in low:
+        return {
+            "cause": "no such bundle, or no access",
+            "detail": f"The Hub returned 404 for {repo_id}. Either the id is wrong, or the repo is "
+                      "private and your token cannot see it — the Hub reports both the same way.",
+            "evidence": _evidence(text),
+            "actions": [f"tt-model search {repo_id.split('/')[-1]}   # find the right id",
+                        "tt-model login                     # if it is private"],
+        }
+
+    if name == "EntryNotFoundError" or MANIFEST_NAME in text:
+        return {
+            "cause": "not a tt-model bundle",
+            "detail": f"The repo exists but has no {MANIFEST_NAME}, so there is nothing for tt-model "
+                      "to install.",
+            "evidence": _evidence(text),
+            "actions": ["tt-model search --catalog     # bundles published for tt-model"],
+        }
+
+    return {
+        "cause": "the Hub request failed",
+        "detail": f"{name} while talking to the Hugging Face Hub about {repo_id}.",
+        "evidence": _evidence(text),
+        "actions": ["re-run with --verbose for the full traceback"],
+    }

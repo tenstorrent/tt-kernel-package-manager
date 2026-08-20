@@ -501,3 +501,16 @@ def raw(text=""):
     Never use this for human-facing status; that belongs to step()/note()/cards.
     """
     print(text)
+
+
+def set_no_color(value=True):
+    """Strip colour/styling from both consoles (honours --no-color).
+
+    Rebinds rather than mutating: a Console's colour system is fixed at construction, so
+    the only reliable way to turn styling off after import is to build new ones.
+    """
+    global console, _real_console
+    if not value:
+        return
+    console = Console(theme=THEME, highlight=False, soft_wrap=False, no_color=True)
+    _real_console = Console(theme=THEME, file=sys.__stdout__, highlight=False, no_color=True)
