@@ -202,6 +202,17 @@ def render_run_sh(manifest: Manifest) -> str:
     serving = f"--max_num_seqs {max_num_seqs} --block_size {block_size}"
     if res and res.max_model_len:
         serving += f" --max_model_len {res.max_model_len}"
+    # Tool/reasoning parsers, if the manifest declares them. Same vLLM flag spelling the
+    # compose path uses (see bundles._compose_launch_command): vLLM's FlexibleArgumentParser
+    # normalizes '_'->'-', so '--tool_parser' would become the nonexistent '--tool-parser';
+    # the real flag is '--tool-call-parser', and vLLM hard-errors on it without
+    # '--enable-auto-tool-choice'. '--reasoning_parser' normalizes to the valid '--reasoning-parser'.
+    cap = manifest.capabilities
+    if cap is not None:
+        if cap.tool_parser:
+            serving += f" --enable-auto-tool-choice --tool-call-parser {cap.tool_parser}"
+        if cap.reasoning_parser:
+            serving += f" --reasoning_parser {cap.reasoning_parser}"
     if res and res.extra_args:
         serving += " " + " ".join(str(a) for a in res.extra_args)
     return f"""#!/usr/bin/env bash
