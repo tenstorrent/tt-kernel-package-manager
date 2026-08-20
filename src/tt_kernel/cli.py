@@ -1737,7 +1737,8 @@ def _serve_activation(entry: dict, *, instance_override: Optional[str]):
 
 def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, local_only: bool,
                 arch: Optional[str], bundles_dir: Optional[str], do_health: bool,
-                force: bool = False, instance: Optional[str] = None) -> None:
+                force: bool = False, instance: Optional[str] = None,
+                extra_args: Optional[List[str]] = None) -> None:
     """The vLLM one-command serve flow: pull-if-needed, launch, (optional) health, endpoint."""
     if local_only:
         entry = localdb.get(repo_id)
@@ -1761,9 +1762,13 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
         )
 
     inst_python, activation_env, inst_label = _serve_activation(entry, instance_override=instance)
-    argv = runtime.vllm_serve_argv(launch.command, python=inst_python)
+    # Anything the user typed after the bundle id goes to vLLM, AFTER the bundle's own
+    # command so a user --port/--host wins over the bundle default (argparse last-wins).
+    argv = runtime.vllm_serve_argv(launch.command, python=inst_python) + list(extra_args or [])
     env = runtime.vllm_serve_env(extra_models_dir, launch.env, activation_env=activation_env)
-    endpoint = _endpoint_from_command(launch.command)
+    # Parse the FINAL argv, not launch.command: otherwise we announce the bundle's port
+    # while vLLM binds the user's, and the preflight would check the wrong one.
+    endpoint = _endpoint_from_command(argv)
 
     # If a pin was requested but the launch command's first token isn't a Python interpreter,
     # the interpreter can't be substituted — the process would run under the ambient one while
@@ -1784,7 +1789,7 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
         exports = " ".join(f"{k}={v}" for k, v in
                            {**activation_env, runtime.ENV_EXTRA_MODELS_DIR: str(extra_models_dir),
                             **launch.env}.items())
-        typer.echo(f"{exports} " + " ".join(argv))
+        console.raw(f"{exports} " + " ".join(argv))
         return
     # Check the interpreter that will actually run (the pinned instance's, if any) — not the
     # manager's, which may be a pipx venv with no vLLM (review G3).
@@ -1854,7 +1859,7 @@ def serve(
     _warn_toolchain()  # host-provisioned path: the surrounding tt-metal/vLLM versions do matter here
     _serve_vllm(repo_id, revision, print_only=print_only, local_only=local_only,
                 arch=arch, bundles_dir=bundles_dir, do_health=health_check,
-                force=force, instance=instance)
+                force=force, instance=instance, extra_args=extra_args)
 
 
 @app.command()

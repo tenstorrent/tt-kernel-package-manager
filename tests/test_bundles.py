@@ -214,3 +214,64 @@ def test_push_pull_serve_roundtrip(monkeypatch, tmp_path):
     rm = runner.invoke(cli.app, ["rm", "acme/llama"])
     assert rm.exit_code == 0, rm.output
     assert localdb.get("acme/llama") is None
+
+
+# ------------------------------------------------ passthrough args reach vLLM (F15)
+def _seed_print_bundle(tmp_path, port="8100"):
+    src = _make_bundle_folder(
+        tmp_path, arch="LlamaForCausalLM",
+        main_class="models.tt_transformers.tt.generator_vllm:LlamaForCausalLM",
+        launch={"default": {"command": ["python3", "server_example_tt.py", "--model",
+                                        "org/m", "--port", port],
+                            "env": {"MESH_DEVICE": "P150"}}},
+    )
+    dest = bundles.install_bundle(src, tmp_path / "bundles", "org__m")
+    _seed_vllm_installed("org/m", dest)
+    return dest
+
+
+def test_serve_passes_extra_args_through_to_vllm(monkeypatch, tmp_path):
+    """`serve` declares allow_extra_args and documents passthrough, but only the
+    self-contained path ever received it — `_serve_vllm` had no extra_args parameter, so on
+    the host-provisioned path every argument after the bundle id was silently dropped. A
+    silently ignored flag is worse than a rejected one."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_print_bundle(tmp_path)
+    res = runner.invoke(cli.app, ["serve", "org/m", "--print", "--local-only",
+                                  "--port", "7009", "--max-num-seqs", "8"])
+    assert res.exit_code == 0, res.output
+    assert "--port 7009" in res.output
+    assert "--max-num-seqs 8" in res.output
+
+
+def test_user_port_wins_over_the_bundle_default(monkeypatch, tmp_path):
+    """Passthrough is appended after the bundle's own command so argparse last-wins gives
+    the user's --port priority; the bundle default must still be present but overridden."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_print_bundle(tmp_path, port="8100")
+    res = runner.invoke(cli.app, ["serve", "org/m", "--print", "--local-only",
+                                  "--port", "7009"])
+    assert res.exit_code == 0, res.output
+    cmd = res.output.strip().splitlines()[-1]
+    assert cmd.index("--port 8100") < cmd.index("--port 7009")
+
+
+def test_announced_endpoint_matches_the_overridden_port(monkeypatch, tmp_path):
+    """The endpoint was parsed from the bundle's launch command, so `serve --port 7009`
+    announced :8100 while vLLM bound 7009. Announcing a port we are not binding also means
+    a port preflight would check the wrong one."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_print_bundle(tmp_path, port="8100")
+    res = runner.invoke(cli.app, ["serve", "org/m", "--print", "--local-only",
+                                  "--port", "7009"])
+    assert res.exit_code == 0, res.output
+    assert "http://localhost:7009" in res.output
+    assert "http://localhost:8100" not in res.output
+
+
+def test_no_passthrough_leaves_the_bundle_command_alone(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    _seed_print_bundle(tmp_path, port="8100")
+    res = runner.invoke(cli.app, ["serve", "org/m", "--print", "--local-only"])
+    assert res.exit_code == 0, res.output
+    assert "http://localhost:8100" in res.output
