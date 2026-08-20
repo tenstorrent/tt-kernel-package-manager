@@ -1458,10 +1458,16 @@ def instances_scan(
 
 
 # ------------------------------------------------------------------------- doctor
-def _warn_toolchain() -> None:
+def _warn_toolchain(python: Optional[str] = None) -> None:
     """Warn (never abort) about an inadequate surrounding toolchain. Called by run/pull
-    so a version skew is surfaced without blocking the user's action."""
-    for c in toolchain.check_toolchain().problems:
+    so a version skew is surfaced without blocking the user's action.
+
+    *python* is the interpreter that will actually serve (a selected instance's, when one is
+    resolved). Without it the warning describes tt-model's own venv, which for a pipx or
+    manager install is not where vLLM lives — the plugin then reads as missing on a host
+    that serves fine. `serve`'s hard error already checks the instance interpreter, so
+    omitting this made the warning contradict the error a few lines below it."""
+    for c in toolchain.check_toolchain(python).problems:
         typer.secho(f"  ! {c.name}: {c.message}", fg=typer.colors.YELLOW)
 
 
@@ -1516,9 +1522,9 @@ def _report_bundle_requirements(repo_id: str, arch: Optional[str]) -> bool:
     if not (manifest.platform or manifest.runtime):
         typer.secho(f"  · authored against tt-metal {manifest.tt_metal_version} "
                     "(v3 bundle — no version ranges declared)", fg=typer.colors.CYAN)
-    return not unmet
-
-    # Which installed tt-metal instance would serve this model.
+    # Which installed tt-metal instance would serve this model. This sat AFTER the return
+    # below and so never ran, which is why `doctor <bundle>` reported a bundle's required
+    # ranges without ever naming the instance that satisfies them.
     if manifest.platform or manifest.runtime:
         ttnn, vllm, plugin = _manifest_ranges(manifest)
         result = instances.select(ttnn=ttnn, vllm=vllm, plugin=plugin)
@@ -1527,6 +1533,8 @@ def _report_bundle_requirements(repo_id: str, arch: Optional[str]) -> bool:
         else:
             typer.secho(f"  → no instance selectable: {result.reason} "
                         "(register one with `tt-model instances add`)", fg=typer.colors.YELLOW)
+
+    return not unmet
 
 
 @app.command()
@@ -1694,6 +1702,10 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
         )
 
     inst_python, activation_env, inst_label = _serve_activation(entry, instance_override=instance)
+    # Warn only now: before this line the interpreter that will serve is unknown, and the
+    # check aimed at tt-model's own venv reported a missing plugin for instances that have
+    # one. Same interpreter the hard error below uses, so the two cannot disagree.
+    _warn_toolchain(inst_python)
     argv = runtime.vllm_serve_argv(launch.command, python=inst_python)
     env = runtime.vllm_serve_env(extra_models_dir, launch.env, activation_env=activation_env)
     endpoint = _endpoint_from_command(launch.command)
@@ -1782,7 +1794,7 @@ def serve(
                 _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
                 return
 
-    _warn_toolchain()  # host-provisioned path: the surrounding tt-metal/vLLM versions do matter here
+    # (_serve_vllm warns once it knows which instance's interpreter will serve.)
     _serve_vllm(repo_id, revision, print_only=print_only, local_only=local_only,
                 arch=arch, bundles_dir=bundles_dir, do_health=health_check,
                 force=force, instance=instance)
