@@ -216,7 +216,10 @@ PYBIN="$VENV/bin/python"
 TTNN_DIR="$("$PYBIN" -c 'import importlib.util,os;print(os.path.dirname(importlib.util.find_spec("ttnn").origin))')"
 # _ttnncpp.so lives in ttnn.libs/ for an auditwheel-repaired (portable) wheel, or build/lib/ for a
 # raw one; preload it to avoid the glibc "static TLS block" error on late dlopen.
-LD_PRELOAD="$(ls "$TTNN_DIR"/../*.libs/_ttnncpp*.so "$TTNN_DIR"/build/lib/_ttnncpp*.so 2>/dev/null | head -1)"
+# Prefer the auditwheel-vendored copy in *.libs/ (that's the one _ttnn.so actually loads via
+# RPATH); fall back to build/lib for a raw (unrepaired) wheel.
+LD_PRELOAD="$(ls "$TTNN_DIR"/../*.libs/_ttnncpp*.so 2>/dev/null | head -1)"
+[ -n "$LD_PRELOAD" ] || LD_PRELOAD="$(ls "$TTNN_DIR"/build/lib/_ttnncpp*.so 2>/dev/null | head -1)"
 export LD_PRELOAD="${{LD_PRELOAD:?could not locate _ttnncpp.so in the ttnn install}}"
 export TT_METAL_HOME="$TTNN_DIR"
 # EXTRA_MODELS_DIR is a PARENT of per-model bundle folders; the plugin scans its children for
