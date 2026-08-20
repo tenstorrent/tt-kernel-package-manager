@@ -76,7 +76,7 @@ def test_stage_package_layout(tmp_path):
         assert (staged / s).stat().st_mode & 0o111  # executable
     # run.sh wired the non-obvious env + serving args the TT backend requires
     run = (staged / "run.sh").read_text()
-    assert "_ttnncpp.so" in run and "TT_VLLM_BUILTIN_MODELS=0" in run
+    assert "_ttnncpp" in run and "TT_VLLM_BUILTIN_MODELS=0" in run
     assert 'EXTRA_MODELS_DIR="$HERE/vllm_models"' in run
     assert "find_spec" in run                      # ttnn located without importing it
     assert 'export HF_MODEL=' in run               # adapter reads HF_MODEL from env
@@ -119,6 +119,7 @@ def test_cli_package_stage_only(tmp_path):
             "--main-class", "generator_vllm:LlamaForCausalLM",
             "--weights", "unsloth/Llama-3.2-3B-Instruct",
             "--mesh", "P150",
+            "--no-repair", "--no-vendor-deps",
             "--out", str(out),
         ],
     )

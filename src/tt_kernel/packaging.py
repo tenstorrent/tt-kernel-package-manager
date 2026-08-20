@@ -121,27 +121,60 @@ def make_wheel_artifact(src: Path, rel_path: str) -> WheelArtifact:
     )
 
 
-def render_install_sh() -> str:
-    """A self-contained installer: make a venv, install the shipped wheels, then the deps.
+def render_install_sh(manifest: Manifest) -> str:
+    """A reproducible, isolated installer built on **uv**.
 
-    Path-relative and idempotent so it works wherever ``pull`` materializes the folder. Takes an
-    optional venv path as ``$1`` (default ``./venv``) so a caller (tt-model pull) can point it at
-    a managed location.
+    The old installer used the host's ``python3`` and a fresh unpinned ``pip`` resolve, so the
+    same bundle installed differently (or not at all) on another machine. This version is
+    deterministic across machines:
+
+    - **uv provisions the exact interpreter** (``uv venv --python <pinned>``) — the target host
+      needs no matching Python; uv downloads it if absent.
+    - **install is offline from the vendored wheels** when ``deps_vendored`` is set
+      (``--no-index --find-links wheels/``): the full dependency closure ships in the bundle, so
+      there is no PyPI/resolver drift and no network at install time. If deps aren't vendored, it
+      falls back to installing the platform wheels + ``requirements.txt`` from the CPU index.
+    - uv is bootstrapped into the bundle (``.uv/``) if not already on PATH — a single static binary.
+
+    Idempotent and path-relative; takes an optional venv path as ``$1`` (default ``./venv``).
     """
+    b = manifest.bundled
+    pyver = (b.python if b and b.python else "3.12")
+    plat_wheels = " ".join(f'"$HERE/{w.path}"' for w in (b.wheels if b else []))
+    vendored = bool(b and b.deps_vendored)
+    if vendored:
+        install = (
+            f'uv pip install --python "$VENV/bin/python" --no-index '
+            f'--find-links "$HERE/{WHEELS_DIR}" {plat_wheels} -r "$HERE/{REQUIREMENTS}"'
+        )
+        deps_note = "offline, from the vendored wheels (reproducible, no network)"
+    else:
+        install = (
+            f'uv pip install --python "$VENV/bin/python" {plat_wheels} && \\\n'
+            f'  uv pip install --python "$VENV/bin/python" '
+            f'--extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{REQUIREMENTS}"'
+        )
+        deps_note = "from the CPU index (deps not vendored — pass --vendor-deps for offline)"
     return f"""#!/usr/bin/env bash
-# Install this self-contained TT model package into a fresh venv.
+# Install this self-contained TT model package into an isolated, reproducible venv (via uv).
 # Usage: ./{INSTALL_SCRIPT} [venv-path]   (default: ./venv)
+# Deps: {deps_note}
 set -euo pipefail
 HERE="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 VENV="${{1:-$HERE/venv}}"
+PYVER="{pyver}"
 
-python3 -m venv "$VENV"
-"$VENV/bin/pip" install -q --upgrade pip
-# The author's built wheels: ttnn (custom kernels compiled in), base empty-vLLM, plugin.
-"$VENV/bin/pip" install "$HERE/{WHEELS_DIR}"/*.whl
-# Dependencies (torch is the CPU build — Tenstorrent does not use CUDA torch).
-"$VENV/bin/pip" install --extra-index-url {_PYTORCH_CPU_INDEX} -r "$HERE/{REQUIREMENTS}"
-echo "installed into $VENV"
+# uv gives us a pinned interpreter + deterministic installs, independent of the host Python.
+if ! command -v uv >/dev/null 2>&1; then
+  export UV_INSTALL_DIR="$HERE/.uv"
+  curl -LsSf https://astral.sh/uv/install.sh | sh >/dev/null 2>&1
+  export PATH="$HERE/.uv:$PATH"
+fi
+
+# Provision the exact interpreter (uv downloads it if the host lacks it) and build the venv.
+uv venv --python "$PYVER" "$VENV"
+{install}
+echo "installed into $VENV (python $PYVER)"
 """
 
 
@@ -181,13 +214,18 @@ PYBIN="$VENV/bin/python"
 # Locate ttnn WITHOUT importing it — importing loads _ttnn.so, which is exactly what needs the
 # LD_PRELOAD below (chicken-and-egg). find_spec resolves the path without executing the module.
 TTNN_DIR="$("$PYBIN" -c 'import importlib.util,os;print(os.path.dirname(importlib.util.find_spec("ttnn").origin))')"
-export LD_PRELOAD="$TTNN_DIR/build/lib/_ttnncpp.so"   # glibc static-TLS workaround
+# _ttnncpp.so lives in ttnn.libs/ for an auditwheel-repaired (portable) wheel, or build/lib/ for a
+# raw one; preload it to avoid the glibc "static TLS block" error on late dlopen.
+LD_PRELOAD="$(ls "$TTNN_DIR"/../*.libs/_ttnncpp*.so "$TTNN_DIR"/build/lib/_ttnncpp*.so 2>/dev/null | head -1)"
+export LD_PRELOAD="${{LD_PRELOAD:?could not locate _ttnncpp.so in the ttnn install}}"
 export TT_METAL_HOME="$TTNN_DIR"
 # EXTRA_MODELS_DIR is a PARENT of per-model bundle folders; the plugin scans its children for
 # each vllm_metadata.json (so the metadata lives in {METADATA_DIR}/<model>/, not the bundle root).
 export EXTRA_MODELS_DIR="$HERE/{METADATA_DIR}"
 export TT_VLLM_BUILTIN_MODELS=0
-export VLLM_PLUGINS=tt,tt_model_registry
+# Do NOT set VLLM_PLUGINS: it is an ALLOW-LIST — setting it suppresses the vllm.general_plugins
+# group, so the model's tool/reasoning-parser overrides would silently not load. The TT platform
+# + model registry load via entry points without it.
 export PYTHONPATH="$HERE/{METAL_DIR}:${{PYTHONPATH:-}}"   # resolves the adapter's models.* imports
 export MESH_DEVICE="${{MESH_DEVICE:-{mesh_device}}}"
 export TT_METAL_VISIBLE_DEVICES="${{TT_METAL_VISIBLE_DEVICES:-0}}"
@@ -214,6 +252,8 @@ def stage_package(
     resources: Optional[Resources] = None,
     tt_metal_version: str = "unknown",
     firmware_min: Optional[str] = None,
+    python_version: Optional[str] = None,
+    deps_vendored: bool = False,
 ) -> Manifest:
     """Materialize the running-folder layout under ``staged`` and return the v5 manifest.
 
@@ -232,6 +272,9 @@ def stage_package(
         return make_wheel_artifact(dest, f"{WHEELS_DIR}/{src.name}")
 
     ttnn_art = _copy_wheel(ttnn_wheel)
+    if python_version is None and ttnn_art.python_tag and ttnn_art.python_tag.startswith("cp"):
+        digits = ttnn_art.python_tag[2:]
+        python_version = f"{digits[0]}.{digits[1:]}" if len(digits) >= 2 else None
     vllm_art = _copy_wheel(vllm_wheel) if vllm_wheel else None
     plugin_art = _copy_wheel(plugin_wheel) if plugin_wheel else None
     extra_arts = [_copy_wheel(w) for w in (extra_wheels or [])]
@@ -267,6 +310,8 @@ def stage_package(
         plugin_wheel=plugin_art,
         extra_wheels=extra_arts,
         metal_dir=METAL_DIR,
+        python=python_version,
+        deps_vendored=deps_vendored,
         requirements=REQUIREMENTS,
         install_script=INSTALL_SCRIPT,
         run_script=RUN_SCRIPT,
@@ -298,7 +343,7 @@ def stage_package(
     )
 
     # Generated scripts (run.sh reads the manifest's weights/mesh/env).
-    (staged / INSTALL_SCRIPT).write_text(render_install_sh())
+    (staged / INSTALL_SCRIPT).write_text(render_install_sh(manifest))
     (staged / RUN_SCRIPT).write_text(render_run_sh(manifest))
     for s in (INSTALL_SCRIPT, RUN_SCRIPT):
         (staged / s).chmod(0o755)

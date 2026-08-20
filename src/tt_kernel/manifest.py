@@ -183,6 +183,8 @@ class BundledPlatform(BaseModel):
     plugin_wheel: Optional[WheelArtifact] = None
     extra_wheels: List[WheelArtifact] = Field(default_factory=list)
     metal_dir: Optional[str] = None  # embedded metal-community tree path, e.g. "metal"
+    python: Optional[str] = None  # pinned interpreter (major.minor, e.g. "3.12") uv provisions
+    deps_vendored: bool = False  # True => the full dependency closure is vendored in wheels/ (offline install)
     requirements: Optional[str] = None  # requirements.txt path within the bundle
     install_script: Optional[str] = None  # e.g. "install.sh"
     run_script: Optional[str] = None  # e.g. "run.sh"

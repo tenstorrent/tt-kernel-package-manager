@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import datetime
+import importlib.util
 import json
 import os
 import shutil
@@ -564,6 +565,63 @@ def _push_vllm(
 
 
 # -------------------------------------------------------------------------- package
+def _ensure_portable_wheel(wheel: Path, *, repair: bool) -> Path:
+    """Make the ttnn wheel self-contained with auditwheel: vendor its external libs (libtracy/
+    libmpi/libhwloc/libnuma/...) and rewrite RPATH to $ORIGIN. Without this the shipped .so's load
+    from the author's build tree / host and fail on another machine (the #1 cross-machine bug).
+    Skips an already-portable (manylinux-tagged) wheel; --no-repair ships the raw wheel with a loud
+    warning."""
+    if "manylinux" in wheel.name:
+        return wheel  # already repaired/portable
+    if not repair:
+        typer.secho(
+            "  ! --no-repair: shipping the ttnn wheel as-is. Its .so RPATH likely points at your "
+            "build tree and external libs aren't vendored, so it will probably fail on another "
+            "machine. Only use this if you know the wheel is already portable.",
+            fg=typer.colors.YELLOW,
+        )
+        return wheel
+    if importlib.util.find_spec("auditwheel") is None:
+        raise _err("auditwheel is required to make the ttnn wheel portable (vendors libtracy/"
+                   "libmpi/libnuma/libhwloc and rewrites RPATH to $ORIGIN). Install it with "
+                   "`pip install auditwheel patchelf`, or re-run with --no-repair to ship as-is.")
+    outdir = Path(tempfile.mkdtemp(prefix="tt-model-repair-"))
+    typer.echo("Repairing ttnn wheel for portability (auditwheel: vendor libs + $ORIGIN RPATH) ...")
+    try:
+        subprocess.run([sys.executable, "-m", "auditwheel", "repair", str(wheel), "-w", str(outdir)],
+                       check=True)
+    except subprocess.CalledProcessError as exc:
+        raise _err(f"auditwheel repair failed (exit {exc.returncode}). The build tree the wheel was "
+                   "built from must be present so auditwheel can find the external libs to vendor; "
+                   "or re-run with --no-repair. See the output above.")
+    repaired = sorted(outdir.glob("ttnn-*.whl"))
+    if not repaired:
+        raise _err("auditwheel produced no wheel; re-run with --no-repair or repair manually.")
+    typer.secho(f"  ✓ portable ttnn wheel: {repaired[0].name}", fg=typer.colors.GREEN)
+    return repaired[0]
+
+
+def _vendor_dependencies(bundle_dir: Path, manifest: Manifest) -> None:
+    """Download the full dependency closure as wheels into the bundle for offline, reproducible
+    install. Runs on the author's box (cp312/linux == the bundle's pinned target); the consumer
+    then installs with ``--no-index`` so there is no PyPI/resolver drift or network at install."""
+    req = bundle_dir / (manifest.bundled.requirements or "requirements.txt")
+    wheels = bundle_dir / packaging.WHEELS_DIR
+    if not req.is_file():
+        typer.secho("  (no requirements.txt to vendor)", fg=typer.colors.YELLOW)
+        return
+    typer.echo("Vendoring dependency wheels for offline install (torch/transformers/...) ...")
+    cmd = [
+        sys.executable, "-m", "pip", "download", "-r", str(req), "-d", str(wheels),
+        "--only-binary=:all:", "--extra-index-url", "https://download.pytorch.org/whl/cpu",
+    ]
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise _err(f"dependency vendoring failed (pip download exit {exc.returncode}). "
+                   "Re-run with --no-vendor-deps to install deps from the index instead.")
+
+
 def _classify_wheels(wheels_dir: Path) -> dict:
     """Auto-classify the .whl files in a dir by distribution name prefix.
 
@@ -642,6 +700,21 @@ def package(
         None, "--env", help="KEY=VALUE serving env, overlaid at run time (repeatable)."
     ),
     firmware_min: Optional[str] = typer.Option(None, "--firmware-min", help="Minimum card firmware/driver version."),
+    vendor_deps: bool = typer.Option(
+        True, "--vendor-deps/--no-vendor-deps", help="Vendor the full dependency closure "
+        "(torch/transformers/... as wheels) into the bundle so install is offline + reproducible "
+        "across machines. --no-vendor-deps installs deps from the CPU index instead (smaller, "
+        "needs network, less reproducible)."
+    ),
+    python_version: Optional[str] = typer.Option(
+        None, "--python", help="Pinned interpreter (major.minor) uv provisions on the consumer "
+        "(default: derived from the ttnn wheel tag, e.g. cp312 -> 3.12)."
+    ),
+    repair_wheel: bool = typer.Option(
+        True, "--repair/--no-repair", help="Run auditwheel on the ttnn wheel so it is portable "
+        "(vendors external libs + $ORIGIN RPATH). --no-repair ships the raw wheel (likely fails "
+        "on another machine)."
+    ),
     out: Optional[str] = typer.Option(
         None, "--out", help="Stage the running folder here (kept even without a push target)."
     ),
@@ -687,6 +760,7 @@ def package(
     for label, p in (("ttnn", picked["ttnn"]), ("vllm", picked["vllm"]), ("plugin", picked["plugin"])):
         if p is not None and not p.is_file():
             raise _err(f"{label} wheel {str(p)!r} does not exist.")
+    picked["ttnn"] = _ensure_portable_wheel(picked["ttnn"], repair=repair_wheel)
 
     # vllm_metadata: an authored file, or synthesized from --arch-name/--main-class.
     if metadata:
@@ -736,6 +810,8 @@ def package(
             resources=resources,
             tt_metal_version=metal.resolve_version() or "unknown",
             firmware_min=firmware_min,
+            python_version=python_version,
+            deps_vendored=vendor_deps,
         )
 
     def _report(m: Manifest, where: Path) -> None:
@@ -752,6 +828,8 @@ def package(
     else:
         upload_from = Path(tempfile.mkdtemp(prefix="tt-model-pkg-")) / "bundle"
     manifest = _stage(upload_from)
+    if vendor_deps:
+        _vendor_dependencies(upload_from, manifest)
     _report(manifest, upload_from)
     if repo_id is None:
         typer.secho("  (no push target — staged only)", fg=typer.colors.CYAN)
