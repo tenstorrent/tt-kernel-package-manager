@@ -102,3 +102,25 @@ The command was renamed `tt-kernel` → `tt-model`. For anyone already on the ol
   (`tt_kernel_manifest.json`), and every prior schema version is still read.
 
 These shims are deprecated; switch to `tt-model` when convenient.
+
+## Reproducibility & isolation (why push-here/pull-there works)
+Cross-machine review found the artifact was never truly self-contained — it silently leaned on the
+author's box. These are now closed by construction:
+
+- **Portable engine wheel.** `tt-model package` runs `auditwheel repair` on the ttnn wheel
+  (`--repair`, default): it vendors the external libs (libtracy/libmpi/libhwloc/libnuma + their
+  deps) into `ttnn.libs/` and rewrites RPATH to `$ORIGIN`. Before this, the shipped `.so`s' RPATH
+  led with the build tree, so on the build box everything loaded from there and validation tested
+  the build tree, not the artifact. (Requires `auditwheel`+`patchelf` on the author's box, and the
+  build tree present so the libs can be found; `--no-repair` opts out with a loud warning.)
+- **Pinned interpreter + offline deps.** `install.sh` uses **uv** to provision the *exact* Python
+  (the host Python no longer has to match) and installs **offline from the vendored dependency
+  wheels** (`--vendor-deps`, default) — no PyPI/resolver drift, no network at install. The pinned
+  version and vendored flag are recorded in the manifest.
+- **No `VLLM_PLUGINS` in run.sh.** That variable is an allow-list; setting it silently suppressed
+  the model's tool/reasoning-parser plugins. The TT platform + registry load via entry points.
+- **`_ttnncpp` preload is located wherever it lives** (`ttnn.libs/` for a repaired wheel, else
+  `build/lib/`) — run.sh globs both.
+- **Re-pull preserves your edits** — an existing install is reused unless `--force`.
+- **serve pass-through + `--print`.** `tt-model serve <id> -- <vllm args>` forwards extra args;
+  `--print` echoes the fully *resolved* command+env (not a bare `bash run.sh`).
