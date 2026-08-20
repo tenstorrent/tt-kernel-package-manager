@@ -353,7 +353,9 @@ def stage_package(
     (staged / INSTALL_SCRIPT).write_text(render_install_sh(manifest))
     (staged / RUN_SCRIPT).write_text(render_run_sh(manifest))
     for s in (INSTALL_SCRIPT, RUN_SCRIPT):
-        (staged / s).chmod(0o755)
+        # Owner rwx only (0o700) — the puller runs these; no group/other bits needed
+        # (avoids a world/group-permissive mode; we also invoke them via `bash <script>`).
+        (staged / s).chmod(0o700)
 
     (staged / "tt_kernel_manifest.json").write_text(manifest.to_json())
     return manifest
