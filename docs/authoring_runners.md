@@ -1,13 +1,13 @@
-# Authoring a model for `tt-kernel`
+# Authoring a model for `tt-model`
 
-There are two ways to make a model `pull`-and-serve with `tt-kernel`:
+There are two ways to make a model `pull`-and-serve with `tt-model`:
 
 - **vLLM bundle — the default.** Author a `VllmGeneratorAdapter` and ship a small bundle
-  folder; `tt-kernel serve` runs it through the Tenstorrent vLLM plugin (batching, paging,
+  folder; `tt-model serve` runs it through the Tenstorrent vLLM plugin (batching, paging,
   the real serving path). **This is what you almost certainly want.** Jump to
   **[Authoring a vLLM bundle](#authoring-a-vllm-bundle-the-default---backend-vllm)**.
 - **Legacy runner bundle.** A duck-typed `generate()`/`generate_stream()` runner, served by
-  tt-kernel's own minimal `legacy_serve` server. This path is **retired-but-supported**: it
+  tt-model's own minimal `legacy_serve` server. This path is **retired-but-supported**: it
   exists so an already-built legacy runner isn't stranded. It has none of vLLM's batching or
   performance — do not start here for a new model.
 
@@ -20,7 +20,7 @@ There are two ways to make a model `pull`-and-serve with `tt-kernel`:
 
 > **Legacy.** New models should be vLLM bundles (see the bottom of this guide). This section
 > documents the older runner contract, served by `python -m tt_kernel.legacy_serve` (a small
-> OpenAI-compatible shim that ships with tt-kernel — no external serving runtime required).
+> OpenAI-compatible shim that ships with tt-model — no external serving runtime required).
 
 ## 1. Implement the runner contract
 
@@ -62,7 +62,7 @@ MyRunner(model_path, device, max_seq=..., unsafe=..., force_novel=...,
 ```
 
 Declare only the keyword args you use (or accept `**kwargs` and ignore the rest). `model_path`
-is the local weights directory `tt-kernel pull` downloaded for you.
+is the local weights directory `tt-model pull` downloaded for you.
 
 ### Device ownership (mesh runners)
 
@@ -146,7 +146,7 @@ from that same tt-metal build. They are **co-versioned**: the bundle's single
 - **Runner + weights**: install anyway, with a loud warning that it won't run until the
   serving environment matches.
 
-`tt-kernel` does **not** fix a mismatch — that is the user's blocker to resolve (install the
+`tt-model` does **not** fix a mismatch — that is the user's blocker to resolve (install the
 matching tt-metal/ttnn). So: **build, push, and serve in environments with the same tt-metal
 build.** The simplest reliable path is to produce the bundle on the same build you serve on.
 
@@ -158,7 +158,7 @@ From a machine whose kernel cache is populated for your model (run it once to JI
 with your wheel built:
 
 ```bash
-tt-kernel push <ns>/<model>-blackhole --private \
+tt-model push <ns>/<model>-blackhole --private \
   --python-package dist/ttrunner_mymodel-0.1-py3-none-any.whl \
   --runner-spec ttrunner_mymodel.runner:MyRunner \
   --entry-point my_model \
@@ -187,12 +187,12 @@ code (and thus reproduces your numbers).
 ## 5. What the consumer gets
 
 ```bash
-tt-kernel pull <ns>/<model>-blackhole
+tt-model pull <ns>/<model>-blackhole
 ```
 
 installs the kernel cache, `pip install --no-deps` your wheel, downloads the weights, records
-the binding, and prints the exact command to serve via tt-kernel's legacy-runner server
-(needs `pip install 'tt-kernel[serve]'` for fastapi + uvicorn):
+the binding, and prints the exact command to serve via tt-model's legacy-runner server
+(needs `pip install 'tt-model[serve]'` for fastapi + uvicorn):
 
 ```
 python -m tt_kernel.legacy_serve \
@@ -214,7 +214,7 @@ re-pull is idempotent.
 - [ ] Wheel is renamespaced (no `from models...`), self-contained, `ttnn` NOT a dependency.
 - [ ] (Optional) `tt_models.runners` entry point + a `claims()`/`supported_*` hook.
 - [ ] Bundle built and served on the **same tt-metal build** (co-versioned with the kernels).
-- [ ] `tt-kernel push` run with `--python-package` + `--runner-spec` (+ `--weights`).
+- [ ] `tt-model push` run with `--python-package` + `--runner-spec` (+ `--weights`).
 
 ## Common pitfalls
 
@@ -241,9 +241,9 @@ re-pull is idempotent.
 
 ### The v4 unified manifest (`--manifest`, recommended)
 
-Write **one** manifest that declares everything the model needs, and `tt-kernel` **renders**
+Write **one** manifest that declares everything the model needs, and `tt-model` **renders**
 the plugin-owned `vllm_metadata.json` from it on `pull` — you no longer hand-write two files.
-The manifest is a *partial*: you declare the model's requirements; `tt-kernel` fills the
+The manifest is a *partial*: you declare the model's requirements; `tt-model` fills the
 bookkeeping (producer, file index, arch/version detection) at push time.
 
 ```jsonc
@@ -268,13 +268,13 @@ Push it (ship a `--bundle-dir` only if you have a custom adapter class / extensi
 omit it when `entrypoint.class` is a tt-metal built-in):
 
 ```bash
-tt-kernel push you/laguna --private --backend vllm \
+tt-model push you/laguna --private --backend vllm \
   --manifest ./laguna.json --bundle-dir ./adapter   # --bundle-dir optional for built-ins
-tt-kernel pull  you/laguna                            # renders vllm_metadata.json locally
-tt-kernel serve you/laguna                            # composes + launches the vLLM server
+tt-model pull  you/laguna                            # renders vllm_metadata.json locally
+tt-model serve you/laguna                            # composes + launches the vLLM server
 ```
 
-**How the launch command is composed.** `tt-kernel` turns `resources`/`capabilities`/`env`
+**How the launch command is composed.** `tt-model` turns `resources`/`capabilities`/`env`
 into the `server_example_tt.py` launch command (underscore flags: `--max_model_len`,
 `--max_num_seqs`, `--block_size`, `--trace_region_size`, `--tool_parser`, `--reasoning_parser`)
 with `VLLM_USE_V1=1` plus your `env` overlaid. When the mapping doesn't cover something, use
@@ -288,38 +288,38 @@ the escape hatches under `resources`:
 `runtime.plugin_version` (the `vllm_tt_plugin` package) are all *ranges*. On `pull`, an installed
 version outside a range is a **forceable** block (`--force` overrides), never fatal — only an
 `arch` mismatch is fatal. A dev checkout whose version is a bare git sha is treated as "assume
-OK" and never falsely blocked. `tt-kernel doctor you/laguna` prints the required-vs-installed
+OK" and never falsely blocked. `tt-model doctor you/laguna` prints the required-vs-installed
 verdict (and how to get in range) without installing anything. Omitting `plugin_version` keeps
 the legacy presence-only plugin check (the fork tracks `dev`).
 
 **Linking to the right tt-metal build (instances).** When a host has several tt-metal builds,
-tt-kernel doesn't guess from whatever venv is active — it consults an **instance registry** (the
+tt-model doesn't guess from whatever venv is active — it consults an **instance registry** (the
 supply side). On `pull` it selects the **newest installed instance that satisfies all three
 ranges** and **pins** that instance's activation (interpreter + `TT_METAL_HOME` / `PYTHONPATH` /
 `LD_LIBRARY_PATH`) into the install record; `serve` then launches the server under that exact
 build (re-resolving gracefully if the pinned build was removed). Manage instances with:
 
 ```bash
-tt-kernel instances list --for you/laguna   # what's installed, and which satisfy this model
-tt-kernel instances add --name metal-0.73 \  # register a build auto-scan can't find
+tt-model instances list --for you/laguna   # what's installed, and which satisfy this model
+tt-model instances add --name metal-0.73 \  # register a build auto-scan can't find
   --python /opt/tt/0.73/venv/bin/python --tt-metal-home /opt/tt/0.73
-tt-kernel instances scan                     # auto-discover tt-metal checkouts
-tt-kernel pull  you/laguna --instance metal-0.73   # force a specific instance
-tt-kernel serve you/laguna --instance metal-0.73
+tt-model instances scan                     # auto-discover tt-metal checkouts
+tt-model pull  you/laguna --instance metal-0.73   # force a specific instance
+tt-model serve you/laguna --instance metal-0.73
 ```
 
 Instances are discovered from three sources, unioned: the **active** interpreter (always a
 candidate — a single-build box behaves as before), explicit **registry** entries in
-`~/.config/tt-kernel/instances.json` (the manager owns this file), and an **auto-scan** of
-tt-metal checkouts under the scan roots. tt-kernel never *installs* a tt-metal — it only
+`~/.config/tt-model/instances.json` (the manager owns this file), and an **auto-scan** of
+tt-metal checkouts under the scan roots. tt-model never *installs* a tt-metal — it only
 selects among what's present and reports what's missing.
 
 **Discovery.** `push` tags the repo with its `arch` and `target`, so consumers can ask
-`tt-kernel search --target p150x4` / `--arch blackhole` for "what runs on my box".
+`tt-model search --target p150x4` / `--arch blackhole` for "what runs on my box".
 
 ### Legacy: a hand-written `vllm_metadata.json` (`--bundle-dir` only)
 
-The older path — you author `vllm_metadata.json` yourself and `tt-kernel` ships it verbatim —
+The older path — you author `vllm_metadata.json` yourself and `tt-model` ships it verbatim —
 is still supported for existing bundles. Prefer the v4 manifest above for anything new.
 
 A vLLM bundle is **kernels-less**: it ships no precompiled cache (vLLM JITs at first-run
@@ -331,7 +331,7 @@ my_bundle/
   generator_vllm.py       # the adapter class (+ any deps), or omit for a tt-metal built-in
 ```
 
-`vllm_metadata.json` (the plugin owns this schema; `tt-kernel` ships it verbatim and reads
+`vllm_metadata.json` (the plugin owns this schema; `tt-model` ships it verbatim and reads
 only `arch` + the per-machine `launch` command):
 
 ```json
@@ -353,15 +353,15 @@ only `arch` + the per-machine `launch` command):
 - `arch` is the HF `architectures` name; the plugin registers it under its `TT`-prefix
   convention (`TT<arch>`). Reference an existing tt-metal generator via `main_class` and the
   folder needs no code; ship a novel adapter as `generator_vllm.py` in the folder.
-- `launch` is keyed per machine; `tt-kernel serve` selects the entry for the local machine
-  (`<arch>-<n>card` > `<arch>` > `default`, override with `TT_KERNEL_MACHINE`).
+- `launch` is keyed per machine; `tt-model serve` selects the entry for the local machine
+  (`<arch>-<n>card` > `<arch>` > `default`, override with `TT_MODEL_MACHINE`).
 
 Push, then serve:
 
 ```bash
-tt-kernel push you/mymodel --private --backend vllm --bundle-dir ./my_bundle \
+tt-model push you/mymodel --private --backend vllm --bundle-dir ./my_bundle \
   --weights meta-llama/Llama-3.1-8B-Instruct
-tt-kernel serve you/mymodel     # pulls the folder, sets EXTRA_MODELS_DIR, launches vLLM
+tt-model serve you/mymodel     # pulls the folder, sets EXTRA_MODELS_DIR, launches vLLM
 ```
 
 On the serving host the vLLM plugin must be the fork that supports `EXTRA_MODELS_DIR`

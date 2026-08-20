@@ -4,14 +4,14 @@
 """Tests for the community-catalog opt-in: `--publish`, `publish`, `unpublish`.
 
 The catalog is a pure index — the only effect of (un)publishing is flipping the
-`tt-kernel-catalog` tag on a public repo. The Hub calls are monkeypatched; we assert the
+`tt-model-catalog` tag on a public repo. The Hub calls are monkeypatched; we assert the
 tag transitions and the public-only guard.
 """
 
 import pytest
 from typer.testing import CliRunner
 
-from tt_kernel import TT_KERNEL_CATALOG_TAG, cli, hub
+from tt_kernel import TT_MODEL_CATALOG_TAG, cli, hub
 
 runner = CliRunner()
 
@@ -74,7 +74,7 @@ def test_set_catalog_listing_adds_and_removes_tag(monkeypatch):
             pushed["tags"] = list(self.data.tags)
 
     def fake_load(repo_id):
-        return FakeCard(["tt-kernel-cache", "blackhole"])
+        return FakeCard(["tt-model-cache", "blackhole"])
 
     import huggingface_hub
     monkeypatch.setattr(huggingface_hub, "ModelCard",
@@ -82,15 +82,15 @@ def test_set_catalog_listing_adds_and_removes_tag(monkeypatch):
     monkeypatch.setattr(huggingface_hub, "ModelCardData", FakeCardData)
 
     hub.set_catalog_listing("me/x", listed=True)
-    assert TT_KERNEL_CATALOG_TAG in pushed["tags"]
+    assert TT_MODEL_CATALOG_TAG in pushed["tags"]
     assert "blackhole" in pushed["tags"]  # existing tags preserved
 
     # Now removal: card already carries the catalog tag.
     def fake_load_listed(repo_id):
-        return FakeCard(["tt-kernel-cache", "blackhole", TT_KERNEL_CATALOG_TAG])
+        return FakeCard(["tt-model-cache", "blackhole", TT_MODEL_CATALOG_TAG])
 
     monkeypatch.setattr(huggingface_hub, "ModelCard",
                         type("MC", (), {"load": staticmethod(fake_load_listed)}))
     hub.set_catalog_listing("me/x", listed=False)
-    assert TT_KERNEL_CATALOG_TAG not in pushed["tags"]
-    assert "tt-kernel-cache" in pushed["tags"]
+    assert TT_MODEL_CATALOG_TAG not in pushed["tags"]
+    assert "tt-model-cache" in pushed["tags"]

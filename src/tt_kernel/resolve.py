@@ -3,7 +3,7 @@
 
 """Detect-only bundle resolution — "does a bundle exist for this id, and what's in it?"
 
-This is the front-door query the orchestrator (``tt-kernel run``) and the dispatch
+This is the front-door query the orchestrator (``tt-model run``) and the dispatch
 courtesy notice both build on. It is **detection only**: it reads the local install
 index and (optionally) the published manifest, and it NEVER imports a runner or opens a
 device. The verdict it returns is what drives the resolution ladder:

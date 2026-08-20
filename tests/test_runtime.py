@@ -35,7 +35,7 @@ def test_resolve_models_dir_default(monkeypatch):
     monkeypatch.delenv(runtime.ENV_MODELS_DIR, raising=False)
     monkeypatch.setenv("HOME", "/home/someone")
     out = runtime.resolve_models_dir(None, "org/model")
-    assert out == Path("/home/someone/.cache/tt-kernel/models/org/model")
+    assert out == Path("/home/someone/.cache/tt-model/models/org/model")
 
 
 def test_resolve_models_dir_no_org():

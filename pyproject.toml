@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "tt-kernel"
+name = "tt-model"
 version = "0.1.0"
 description = "Publish and pull precompiled tt-metal kernel caches over Hugging Face Hub"
 readme = "README.md"
@@ -25,7 +25,8 @@ test = ["pytest>=7"]
 serve = ["fastapi>=0.110", "uvicorn>=0.29"]
 
 [project.scripts]
-tt-kernel = "tt_kernel.cli:app"
+tt-model = "tt_kernel.cli:main"
+tt-kernel = "tt_kernel.cli:main"  # legacy alias (deprecated)
 
 [tool.setuptools.packages.find]
 where = ["src"]

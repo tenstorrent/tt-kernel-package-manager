@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-"""The compatibility manifest — the correctness core of tt-kernel.
+"""The compatibility manifest — the correctness core of tt-model.
 
 A manifest pins everything the cached binaries depend on so that ``pull`` can refuse
 an install that would silently miss (or, worse, load wrong binaries). It records the
@@ -17,15 +17,17 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-# Current authored schema. ``from_json`` also accepts the immediately prior version so a
-# v3 bundle already published to the Hub keeps installing unchanged (see SUPPORTED_SCHEMAS).
-SCHEMA_VERSION = "4"
+# Current authored schema. ``from_json`` also accepts prior versions so a bundle already
+# published to the Hub keeps installing unchanged (see SUPPORTED_SCHEMAS).
+SCHEMA_VERSION = "5"
 
-# Every schema version this tt-kernel can read. v4 is the unified "model + manifest" schema
-# (structured target/mesh/ranges/resources — vLLM only, kernels-less); v3 is the legacy
-# kernel-cache/dispatch schema, read-only supported. A bundle on any other version is refused
-# outright rather than silently half-read.
-SUPPORTED_SCHEMAS = frozenset({"3", "4"})
+# Every schema version this tt-model can read. v5 is the self-contained ("fat") schema: it adds
+# a ``bundled`` block recording the platform wheels (ttnn/vllm/plugin) the author's box shipped
+# INSIDE the bundle, so a consumer needs only a TT card + firmware. v4 is the unified "model +
+# manifest" schema (structured target/mesh/ranges/resources — vLLM only, host-provisioned
+# platform); v3 is the legacy kernel-cache/dispatch schema, read-only supported. A bundle on any
+# other version is refused outright rather than silently half-read.
+SUPPORTED_SCHEMAS = frozenset({"3", "4", "5"})
 
 
 class FileEntry(BaseModel):
@@ -72,7 +74,7 @@ class RunnerPayload(BaseModel):
     with it, which runner contract the payload satisfies:
 
     - ``backend == "dispatch"`` (default, legacy): a Python runner following the legacy
-      contract (``generate()``/``generate_stream()``/``benchmark()``), served by tt-kernel's
+      contract (``generate()``/``generate_stream()``/``benchmark()``), served by tt-model's
       own legacy-runner server (``tt_kernel.legacy_serve``). Two modes:
 
       - **packaged**: ``wheels`` is non-empty — the wheel(s) are stored under ``python/``
@@ -82,12 +84,12 @@ class RunnerPayload(BaseModel):
         expected to already have it or to install it from ``source``.
 
       ``spec`` is the opaque ``"module:Class"`` string the legacy-runner server loads;
-      tt-kernel records it but never imports it.
+      tt-model records it but never imports it.
 
     - ``backend == "vllm"``: the model is served through the Tenstorrent vLLM plugin. The
       payload is a self-contained bundle *folder* (``bundle_dir``) holding a plugin-owned
       ``vllm_metadata.json`` (arch name, main-class path, per-machine launch command, HF
-      weights ref) plus the ``VllmGeneratorAdapter`` class and its dependencies. tt-kernel
+      weights ref) plus the ``VllmGeneratorAdapter`` class and its dependencies. tt-model
       lays the folder into ``EXTRA_MODELS_DIR`` at serve time; the plugin scans it and
       registers the model. ``vllm_metadata.json`` — not this payload — is the source of
       truth for the serving contract, so ``spec``/``wheels`` are unused for vLLM.
@@ -147,6 +149,54 @@ class Platform(BaseModel):
     ttnn: Optional[str] = None  # PEP 440 specifier, e.g. ">=0.72,<0.76"
 
 
+class WheelArtifact(BaseModel):
+    """One platform wheel shipped inside a self-contained (v5) bundle.
+
+    ``path`` is relative to the bundle repo root (e.g. ``wheels/ttnn-0.75.0-cp312-cp312-linux_x86_64.whl``)
+    and is git-LFS tracked. The wheel-compatibility tags are parsed from the filename so ``pull``
+    can refuse an install on an interpreter/platform the wheel was not built for — the wheels are
+    the author's build (cp312/linux_x86_64), not universal.
+    """
+
+    path: str
+    sha256: str
+    size: int = 0
+    python_tag: Optional[str] = None  # e.g. "cp312"
+    abi_tag: Optional[str] = None  # e.g. "cp312"
+    platform_tag: Optional[str] = None  # e.g. "linux_x86_64"
+
+
+class BundledPlatform(BaseModel):
+    """The self-contained ("fat") platform shipped INSIDE a v5 bundle.
+
+    Unlike ``Platform.ttnn`` (a version *range* gated against a host-installed ttnn), these are the
+    actual artifacts the author built on their box — *their* ttnn wheel (custom C++/LLK kernels
+    already compiled in), the empty-target base vLLM wheel, and the vLLM plugin wheel — embedded in
+    the bundle via git-LFS and installed into a fresh venv by ``install_script``. This is what makes
+    a package "package what's on your box": a consumer needs only a TT card + firmware, not a
+    pre-provisioned tt-metal/vLLM stack. ``metal_dir`` is the author's modified tt-metal-community
+    tree (the ttnn *Python* building blocks + model code), embedded alongside the wheel.
+    """
+
+    ttnn_wheel: Optional[WheelArtifact] = None
+    vllm_wheel: Optional[WheelArtifact] = None
+    plugin_wheel: Optional[WheelArtifact] = None
+    extra_wheels: List[WheelArtifact] = Field(default_factory=list)
+    metal_dir: Optional[str] = None  # embedded metal-community tree path, e.g. "metal"
+    python: Optional[str] = None  # pinned interpreter (major.minor, e.g. "3.12") uv provisions
+    deps_vendored: bool = False  # True => the full dependency closure is vendored in wheels/ (offline install)
+    requirements: Optional[str] = None  # requirements.txt path within the bundle
+    install_script: Optional[str] = None  # e.g. "install.sh"
+    run_script: Optional[str] = None  # e.g. "run.sh"
+    firmware_min: Optional[str] = None  # minimum card firmware/driver version, informational
+
+    @property
+    def wheels(self) -> List[WheelArtifact]:
+        """All shipped wheels in install order (platform runtime first, then plugin, then extras)."""
+        ordered = [self.ttnn_wheel, self.vllm_wheel, self.plugin_wheel, *self.extra_wheels]
+        return [w for w in ordered if w is not None]
+
+
 class Runtime(BaseModel):
     """The serving runtime a v4 bundle needs.
 
@@ -192,7 +242,7 @@ class Entrypoint(BaseModel):
 class Resources(BaseModel):
     """Structured launch knobs the renderer turns into vLLM args.
 
-    Declarative-with-escape-hatch: the common knobs are structured so tt-kernel can validate
+    Declarative-with-escape-hatch: the common knobs are structured so tt-model can validate
     and search on them, while ``command_override`` / ``extra_args`` let an author bypass or
     extend composition without waiting for a new field per vLLM flag.
     """
@@ -240,7 +290,7 @@ class Manifest(BaseModel):
     weights: Optional[WeightsRef] = None
 
     # --- v4 unified-manifest blocks (all optional; absent => a v3 bundle) -------------------
-    # These describe a kernels-less vLLM model in one authoritative document. tt-kernel renders
+    # These describe a kernels-less vLLM model in one authoritative document. tt-model renders
     # the plugin-owned ``vllm_metadata.json`` from them at pull/serve; ``compare()`` gates on
     # the ranges in ``platform``/``runtime``. A v3 bundle leaves them all None and behaves
     # exactly as before.
@@ -254,10 +304,21 @@ class Manifest(BaseModel):
     # Extra process env for serving, overlaid on the rendered launch env.
     env: Dict[str, str] = Field(default_factory=dict)
 
+    # --- v5 self-contained ("fat") block (optional; absent => v3/v4 host-provisioned) ----------
+    # The platform artifacts shipped inside the bundle. When present, pull installs these wheels
+    # into a fresh venv instead of gating on a host-installed tt-metal/vLLM: the package is
+    # self-contained and needs only a TT card + firmware.
+    bundled: Optional[BundledPlatform] = None
+
     @property
     def is_v4(self) -> bool:
         """True for a unified vLLM manifest (has an entrypoint / platform block)."""
         return self.entrypoint is not None or self.platform is not None
+
+    @property
+    def is_self_contained(self) -> bool:
+        """True for a v5 bundle that ships its own platform wheels (needs no host tt-metal/vLLM)."""
+        return self.bundled is not None and bool(self.bundled.wheels)
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=2)
@@ -266,16 +327,16 @@ class Manifest(BaseModel):
     def from_json(cls, text: str) -> "Manifest":
         """Parse and validate a manifest, rejecting any unsupported schema version.
 
-        This tt-kernel reads every schema in ``SUPPORTED_SCHEMAS`` (currently v3 legacy
+        This tt-model reads every schema in ``SUPPORTED_SCHEMAS`` (currently v3 legacy
         kernel-cache and v4 unified vLLM). A bundle on any other version is refused outright
-        rather than silently half-read — re-publish it with a matching tt-kernel.
+        rather than silently half-read — re-publish it with a matching tt-model.
         """
         m = cls.model_validate_json(text)
         if m.schema_version not in SUPPORTED_SCHEMAS:
             supported = ", ".join(sorted(SUPPORTED_SCHEMAS))
             raise ValueError(
-                f"Unsupported bundle schema_version {m.schema_version!r}; this tt-kernel "
-                f"reads schema(s) {supported}. Re-publish the bundle with a current tt-kernel."
+                f"Unsupported bundle schema_version {m.schema_version!r}; this tt-model "
+                f"reads schema(s) {supported}. Re-publish the bundle with a current tt-model."
             )
         return m
 
@@ -386,7 +447,11 @@ def compare(manifest: Manifest, local: "LocalEnv") -> CompatibilityReport:  # no
 
     if manifest.build_key is None:
         # Kernels-less: skip every cache-dependent gate. v4 range gates + device_count only.
-        issues.extend(_range_issues(manifest, local))
+        # A v5 self-contained bundle SHIPS its ttnn/vLLM wheels, so the host-version ranges are
+        # irrelevant (the installed versions come from the bundle, not the host) — skip them. The
+        # shipped wheel's own interpreter/platform tags are verified separately at install time.
+        if not manifest.is_self_contained:
+            issues.extend(_range_issues(manifest, local))
         if local.device_count and manifest.device_count != local.device_count:
             issues.append(
                 Incompatibility(

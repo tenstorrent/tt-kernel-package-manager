@@ -3,10 +3,10 @@
 
 """Validate the surrounding toolchain — and only ever *warn*, never install.
 
-tt-kernel is the front door, but it is not a package installer for the platform: it
+tt-model is the front door, but it is not a package installer for the platform: it
 expects the serving stack (tt-metal and the vLLM fork/plugin) to already be present on the
 system and merely checks it is *adequate*, warning (with the required version) when it is
-not. This keeps tt-kernel's dependency surface tiny and never mutates the user's environment.
+not. This keeps tt-model's dependency surface tiny and never mutates the user's environment.
 """
 
 from __future__ import annotations

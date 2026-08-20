@@ -5,16 +5,16 @@
 
 A v4 manifest declares the *demand* (``platform.ttnn`` / ``runtime.version`` /
 ``runtime.plugin_version`` ranges). This module describes what's actually installed on **this
-host** so tt-kernel can link a model to the right build. An *instance* is an **activation** —
+host** so tt-model can link a model to the right build. An *instance* is an **activation** —
 an interpreter plus the env (``TT_METAL_HOME`` / ``PYTHONPATH`` / ``LD_LIBRARY_PATH``) that
 makes one specific ttnn (and its vLLM + plugin) importable — not just a version string, because
 tt-metal is frequently a source build.
 
 Instances come from three sources, unioned:
 
-- **active** — the interpreter tt-kernel is running under (always a candidate, so a box with
+- **active** — the interpreter tt-model is running under (always a candidate, so a box with
   one build behaves exactly as before this module existed);
-- **registry** — explicit entries in ``~/.config/tt-kernel/instances.json`` (the manager owns
+- **registry** — explicit entries in ``~/.config/tt-model/instances.json`` (the manager owns
   this file; tt-cli or the user writes entries auto-scan can't find);
 - **scan** — auto-discovered tt-metal checkouts under a set of scan roots.
 
@@ -36,6 +36,8 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from . import compat
 from typing import Dict, List, Optional, Tuple
 
 from . import metal
@@ -117,13 +119,13 @@ class SelectionResult:
 
 # --------------------------------------------------------------------------- registry file
 def _registry_path() -> Path:
-    """``$XDG_CONFIG_HOME/tt-kernel/instances.json`` else ``~/.config/tt-kernel/instances.json``.
+    """``$XDG_CONFIG_HOME/tt-model/instances.json`` else ``~/.config/tt-model/instances.json``.
 
     The manager owns this file; it is the first ``~/.config`` user in the codebase (the bundle
     index and caches live under ``~/.cache``). Config, not cache: it records user/tt-cli intent.
     """
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
-    return Path(base) / "tt-kernel" / "instances.json"
+    return compat.data_dir(Path(base)) / "instances.json"
 
 
 def _load() -> dict:
@@ -140,7 +142,7 @@ def _load() -> dict:
         try:
             backup = path.with_suffix(".json.corrupt")
             path.replace(backup)
-            sys.stderr.write(f"tt-kernel: registry {path} was corrupt; moved to {backup}\n")
+            sys.stderr.write(f"tt-model: registry {path} was corrupt; moved to {backup}\n")
         except OSError:
             pass
         return {}
@@ -211,7 +213,7 @@ def remove_instance(name: str) -> bool:
 
 # --------------------------------------------------------------------------- discovery
 def active_instance() -> Instance:
-    """The interpreter tt-kernel runs under — always a candidate (preserves prior behavior)."""
+    """The interpreter tt-model runs under — always a candidate (preserves prior behavior)."""
     return Instance(name="active", python=sys.executable,
                     tt_metal_home=metal.detect_tt_metal_home(), env={}, source="active")
 

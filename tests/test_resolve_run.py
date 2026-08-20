@@ -151,5 +151,5 @@ def test_run_published_legacy_runner_says_pull_first(monkeypatch, tmp_path):
     res = runner.invoke(cli.app, ["run", "org/pub", "--print"])  # allow Hub lookup
     assert res.exit_code == 0, res.output
     assert "legacy runner" in res.output
-    assert "tt-kernel pull org/pub" in res.output
+    assert "tt-model pull org/pub" in res.output
     assert "tt_api" not in res.output                  # no dead dispatch command emitted

@@ -18,17 +18,19 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+from . import compat
 from typing import List, Optional
 
 from .manifest import WeightsRef
 
-ENV_MODELS_DIR = "TT_KERNEL_MODELS_DIR"
-# tt-kernel's own minimal OpenAI server for a legacy (dispatch-contract) runner. This
+ENV_MODELS_DIR = "TT_MODEL_MODELS_DIR"
+# tt-model's own minimal OpenAI server for a legacy (dispatch-contract) runner. This
 # replaces the retired dispatch runtime the runner used to hand off to. Used to BUILD the
 # serve command; the module is only run as a subprocess, never imported here.
 _LEGACY_SERVE_MODULE = "tt_kernel.legacy_serve"
 # The env var the Tenstorrent vLLM plugin reads to discover extra model bundle folders.
-# tt-kernel points it at the local bundles_dir at serve time; the plugin scans it and
+# tt-model points it at the local bundles_dir at serve time; the plugin scans it and
 # registers every model folder found there.
 ENV_EXTRA_MODELS_DIR = "EXTRA_MODELS_DIR"
 _VLLM_PKG = "vllm"
@@ -39,16 +41,16 @@ def resolve_models_dir(models_dir: Optional[str], repo_id: str) -> Path:
     """Where to download a model's weights.
 
     Resolution (env-then-flag, mirroring cache.resolve_out_root): ``--models-dir`` >
-    ``TT_KERNEL_MODELS_DIR`` > ``~/.cache/tt-kernel/models``. The repo id is nested as
+    ``TT_MODEL_MODELS_DIR`` > ``~/.cache/tt-model/models``. The repo id is nested as
     ``<base>/<org>/<name>`` (no slash-flattening) so the path round-trips cleanly for
     ``rm``/serve and never collides.
     """
-    explicit = models_dir if models_dir is not None else os.environ.get(ENV_MODELS_DIR)
+    explicit = models_dir if models_dir is not None else compat.env(ENV_MODELS_DIR)
     if explicit:
         base = Path(explicit).expanduser()
     else:
         home = os.environ.get("HOME")
-        base = (Path(home) / ".cache" if home else Path("/tmp")) / "tt-kernel" / "models"
+        base = compat.data_dir(Path(home) / ".cache" if home else Path("/tmp")) / "models"
     # repo_id is "org/name" (or just "name"); keep its structure under base.
     return base.joinpath(*repo_id.split("/"))
 
@@ -84,7 +86,7 @@ def pip_install_wheels(
     ``--no-deps`` is deliberate: the runner wheel is tree-shaken/self-contained, and we
     must NOT let pip pull a conflicting ``ttnn`` from PyPI (ttnn/tt-metal is the platform
     the version warning points at, never a vendored dep). ``python`` overrides the target
-    interpreter (default: the venv tt-kernel itself runs in, where ttnn should live);
+    interpreter (default: the venv tt-model itself runs in, where ttnn should live);
     ``pip_args`` is an escape hatch for the rare case the wheel really needs extra flags.
     Raises CalledProcessError on a non-zero pip exit.
     """
@@ -102,7 +104,7 @@ def ttnn_importable(python: Optional[str] = None) -> bool:
     """Whether ``ttnn`` is importable from the target interpreter.
 
     Used to warn when pip would install the runner into a venv that lacks ttnn (e.g.
-    tt-kernel was installed via pipx into its own env). For the default interpreter we
+    tt-model was installed via pipx into its own env). For the default interpreter we
     check this process directly; for an explicit ``--python`` we shell out.
     """
     if python is None or python == sys.executable:
@@ -121,7 +123,7 @@ def ttnn_importable(python: Optional[str] = None) -> bool:
 def legacy_serve_available() -> bool:
     """Whether the legacy-runner server (``tt_kernel.legacy_serve``) can actually run here.
 
-    The module itself always imports (it ships with tt-kernel), so what matters is its
+    The module itself always imports (it ships with tt-model), so what matters is its
     web-server dependencies. DETECTION only — ``find_spec`` never imports them.
     """
     try:
@@ -178,14 +180,30 @@ def serve_command(runner_spec: str, weights_path: Path) -> str:
     return " ".join(serve_argv(str(weights_path), runner_spec=runner_spec))
 
 
+# ----------------------------------------------------------------- self-contained
+def install_self_contained(bundle_dir: Path, venv_dir: Path) -> Path:
+    """Run a v5 self-contained bundle's ``install.sh`` to build its own venv.
+
+    The generated ``install.sh`` creates ``venv_dir``, pip-installs the shipped wheels
+    (ttnn with the author's kernels + base vLLM + plugin), then the deps from
+    ``requirements.txt``. Returns the venv's python. Raises CalledProcessError on failure.
+    This is the "install the platform" step that makes a package need only a card + firmware.
+    """
+    script = bundle_dir / "install.sh"
+    if not script.is_file():
+        raise FileNotFoundError(f"{script} not found (not a self-contained bundle).")
+    subprocess.run(["bash", str(script), str(venv_dir)], check=True)
+    return venv_dir / "bin" / "python"
+
+
 # --------------------------------------------------------------------------- vLLM
 def vllm_available(python: Optional[str] = None) -> bool:
     """Whether the Tenstorrent vLLM serving stack (vLLM + the plugin) is importable.
 
     DETECTION only (``find_spec``) — never imports vLLM. Both the fork and the plugin must be
     present for the serve handoff to work. With ``python`` set (a selected tt-metal instance's
-    interpreter, which may be a different venv than the one running tt-kernel), the check
-    shells out to that interpreter — otherwise a pipx-installed tt-kernel would report the
+    interpreter, which may be a different venv than the one running tt-model), the check
+    shells out to that interpreter — otherwise a pipx-installed tt-model would report the
     stack missing even though the *pinned* build can serve.
     """
     if python is not None and python != sys.executable:
@@ -269,7 +287,7 @@ def vllm_serve_argv(launch_command: List[str], *, python: Optional[str] = None) 
 def health_check(base_url: str, *, timeout: float = 5.0) -> tuple[bool, str]:
     """Probe an OpenAI-compatible server's ``/v1/models`` (cheap liveness check).
 
-    Returns ``(ok, detail)``. Uses only the stdlib so tt-kernel adds no HTTP dependency.
+    Returns ``(ok, detail)``. Uses only the stdlib so tt-model adds no HTTP dependency.
     """
     import urllib.error
     import urllib.request

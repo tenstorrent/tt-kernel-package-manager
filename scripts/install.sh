@@ -3,10 +3,10 @@
 #
 # Layers set up here:
 #   - the Tenstorrent vLLM fork + TT plugin (serving layer)
-#   - tt-kernel (distribution layer)
-# then a `tt-kernel doctor` to confirm the stack is adequate.
+#   - tt-model (distribution layer)
+# then a `tt-model doctor` to confirm the stack is adequate.
 #
-# This is orchestration only — tt-kernel's own modules never install anything. It assumes
+# This is orchestration only — tt-model's own modules never install anything. It assumes
 # tt-metal (ttnn) is already built and importable in the target venv (that is the heavy,
 # hardware-coupled part and is out of scope for this script).
 #
@@ -89,16 +89,16 @@ VLLM_TARGET_DEVICE=empty "$PY" -m pip install -e "$VLLM_DIR" \
   --extra-index-url https://download.pytorch.org/whl/cpu
 "$PY" -m pip install -e "$VLLM_DIR/plugins/vllm-tt-plugin"
 
-# 2. Install tt-kernel.
-echo ">> Installing tt-kernel (editable)"
+# 2. Install tt-model.
+echo ">> Installing tt-model (editable)"
 "$PY" -m pip install -e "$REPO_ROOT"
 
 # 3. Report.
-echo ">> Running tt-kernel doctor"
+echo ">> Running tt-model doctor"
 "$PY" -m tt_kernel.cli doctor || true
 
 cat <<EOF
 
 Done. Serve a model with:
-  tt-kernel serve <namespace>/<model>
+  tt-model serve <namespace>/<model>
 EOF

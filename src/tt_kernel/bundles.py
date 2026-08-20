@@ -6,7 +6,7 @@
 A vLLM bundle ships a self-contained per-model folder that the Tenstorrent vLLM plugin
 discovers via ``EXTRA_MODELS_DIR``. The folder holds a plugin-owned ``vllm_metadata.json``
 (arch name, main-class path, per-machine launch command, HF weights ref) plus the
-``VllmGeneratorAdapter`` class and its dependencies. tt-kernel lays the folder into a local
+``VllmGeneratorAdapter`` class and its dependencies. tt-model lays the folder into a local
 ``bundles_dir`` on ``pull`` and points the plugin at that dir on ``serve`` — it never invents
 the serving contract, it only *reads* the arch name and the launch command for this machine.
 
@@ -27,6 +27,8 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+
+from . import compat
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from . import device
@@ -34,9 +36,9 @@ from . import device
 if TYPE_CHECKING:  # avoid import at runtime (manifest doesn't import bundles; keep it one-way)
     from .manifest import Manifest
 
-ENV_BUNDLES_DIR = "TT_KERNEL_BUNDLES_DIR"
-ENV_MACHINE = "TT_KERNEL_MACHINE"
-# The plugin-owned metadata file at the root of a bundle folder. tt-kernel ships it verbatim
+ENV_BUNDLES_DIR = "TT_MODEL_BUNDLES_DIR"
+ENV_MACHINE = "TT_MODEL_MACHINE"
+# The plugin-owned metadata file at the root of a bundle folder. tt-model ships it verbatim
 # and reads only ``arch`` + the per-machine launch command from it.
 VLLM_METADATA_NAME = "vllm_metadata.json"
 
@@ -45,13 +47,13 @@ def resolve_bundles_dir(bundles_dir: Optional[str] = None) -> Path:
     """Where vLLM bundle folders are laid down / read from (== ``EXTRA_MODELS_DIR``).
 
     Resolution (flag > env > default, mirroring ``runtime.resolve_models_dir``):
-    ``--bundles-dir`` > ``TT_KERNEL_BUNDLES_DIR`` > ``~/.cache/tt-kernel/bundles``.
+    ``--bundles-dir`` > ``TT_MODEL_BUNDLES_DIR`` > ``~/.cache/tt-model/bundles``.
     """
-    explicit = bundles_dir if bundles_dir is not None else os.environ.get(ENV_BUNDLES_DIR)
+    explicit = bundles_dir if bundles_dir is not None else compat.env(ENV_BUNDLES_DIR)
     if explicit:
         return Path(explicit).expanduser()
     home = os.environ.get("HOME")
-    return (Path(home) / ".cache" if home else Path("/tmp")) / "tt-kernel" / "bundles"
+    return compat.data_dir(Path(home) / ".cache" if home else Path("/tmp")) / "bundles"
 
 
 def model_key(repo_id: str) -> str:
@@ -100,7 +102,7 @@ class LaunchSpec:
 class VllmMetadata:
     """A thin read-only view over the plugin-owned ``vllm_metadata.json``.
 
-    tt-kernel does not own this schema, so we keep the raw dict and expose only the fields
+    tt-model does not own this schema, so we keep the raw dict and expose only the fields
     the serving orchestration needs: ``arch`` (HF architecture name — the plugin prepends
     ``TT`` when registering), ``main_class`` (``"module:Class"``), an optional ``hf_weights``
     ref, and a per-machine ``launch`` map.
@@ -168,7 +170,7 @@ def _compose_launch_env(manifest: "Manifest") -> Dict[str, str]:
     """Compose the serving env: the V1 engine default, then the manifest's ``env`` overlaid.
 
     Topology-specific vars (``MESH_DEVICE`` etc.) are author-supplied via ``manifest.env`` —
-    tt-kernel does not invent device-mapping names it can't verify from ``mesh`` alone.
+    tt-model does not invent device-mapping names it can't verify from ``mesh`` alone.
     """
     env: Dict[str, str] = {"VLLM_USE_V1": "1"}
     env.update({k: str(v) for k, v in (manifest.env or {}).items()})
@@ -178,7 +180,7 @@ def _compose_launch_env(manifest: "Manifest") -> Dict[str, str]:
 def render_vllm_metadata(manifest: "Manifest") -> dict:
     """Render the plugin-owned ``vllm_metadata.json`` dict from a v4 unified manifest.
 
-    tt-kernel becomes the source of truth: rather than ship an author-written metadata file
+    tt-model becomes the source of truth: rather than ship an author-written metadata file
     verbatim, it *generates* the plugin schema from the one authoritative manifest —
     ``entrypoint.arch_name`` -> ``arch``, ``entrypoint.cls`` -> ``main_class``,
     ``weights.repo`` -> ``hf_weights``, and a ``launch`` map composed from
@@ -236,12 +238,12 @@ def read_vllm_metadata(bundle_folder: Path) -> VllmMetadata:
 def machine_candidates(arch_override: Optional[str] = None) -> List[str]:
     """Ordered launch-map keys to try for the local machine, most specific first.
 
-    ``TT_KERNEL_MACHINE`` (explicit override) > ``<arch>-<n>card`` > ``<arch>`` > ``default``.
+    ``TT_MODEL_MACHINE`` (explicit override) > ``<arch>-<n>card`` > ``<arch>`` > ``default``.
     The bundle author picks whichever granularity they key their ``launch`` map on; we probe
     from most to least specific and fall back to ``default``.
     """
     cands: List[str] = []
-    override = os.environ.get(ENV_MACHINE)
+    override = compat.env(ENV_MACHINE)
     if override:
         cands.append(override)
     info = device.detect(arch_override=arch_override)

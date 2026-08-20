@@ -26,7 +26,7 @@ def _make_bundle_folder(tmp_path, **meta):
 def test_resolve_bundles_dir_precedence(monkeypatch, tmp_path):
     monkeypatch.delenv(bundles.ENV_BUNDLES_DIR, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
-    assert bundles.resolve_bundles_dir() == tmp_path / ".cache" / "tt-kernel" / "bundles"
+    assert bundles.resolve_bundles_dir() == tmp_path / ".cache" / "tt-model" / "bundles"
     monkeypatch.setenv(bundles.ENV_BUNDLES_DIR, str(tmp_path / "envdir"))
     assert bundles.resolve_bundles_dir() == tmp_path / "envdir"
     assert bundles.resolve_bundles_dir(str(tmp_path / "flagdir")) == tmp_path / "flagdir"

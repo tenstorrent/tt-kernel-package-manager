@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-"""tt-kernel: publish and pull precompiled tt-metal kernel caches over Hugging Face Hub."""
+"""tt-model: publish and pull precompiled tt-metal kernel caches over Hugging Face Hub."""
 
 __version__ = "0.1.0"
 
-# HF model-repo tag that marks a repo as a tt-kernel cache bundle (used by search).
-TT_KERNEL_TAG = "tt-kernel-cache"
+# HF model-repo tag that marks a repo as a tt-model cache bundle (used by search).
+TT_MODEL_TAG = "tt-model-cache"
 
 # HF model-repo tag that OPTS a (public) bundle into the community catalog. This is a
-# deliberate, separate act from `push`: pushing a bundle only tags it TT_KERNEL_TAG;
-# `--publish` (or `tt-kernel publish`) additionally adds this tag. The web catalog lists
-# ONLY repos carrying this tag. tt-kernel stores nothing — the catalog is a pure index of
+# deliberate, separate act from `push`: pushing a bundle only tags it TT_MODEL_TAG;
+# `--publish` (or `tt-model publish`) additionally adds this tag. The web catalog lists
+# ONLY repos carrying this tag. tt-model stores nothing — the catalog is a pure index of
 # pointers to public HF repos, which remain under their owners' governance.
-TT_KERNEL_CATALOG_TAG = "tt-kernel-catalog"
+TT_MODEL_CATALOG_TAG = "tt-model-catalog"
 
 # Filename of the compatibility manifest at the root of every bundle.
 MANIFEST_NAME = "tt_kernel_manifest.json"
@@ -24,8 +24,8 @@ MANIFEST_NAME = "tt_kernel_manifest.json"
 from .resolve import BundleResolution, resolve as resolve_bundle  # noqa: E402
 
 __all__ = [
-    "TT_KERNEL_TAG",
-    "TT_KERNEL_CATALOG_TAG",
+    "TT_MODEL_TAG",
+    "TT_MODEL_CATALOG_TAG",
     "MANIFEST_NAME",
     "BundleResolution",
     "resolve_bundle",

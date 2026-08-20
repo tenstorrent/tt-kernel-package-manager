@@ -425,7 +425,7 @@ def test_search_target_and_arch_tags(monkeypatch):
     monkeypatch.setattr(hub, "_api", lambda: _Api())
     res = runner.invoke(cli.app, ["search", "laguna", "--arch", "Blackhole", "--target", "P150x4"])
     assert res.exit_code == 0, res.output
-    assert captured["filter"] == ["tt-kernel-cache", "blackhole", "p150x4"]  # ANDed, lowercased
+    assert captured["filter"] == ["tt-model-cache", "blackhole", "p150x4"]  # ANDed, lowercased
 
 
 def test_doctor_reports_bundle_ranges(monkeypatch):

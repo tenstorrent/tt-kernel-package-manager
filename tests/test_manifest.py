@@ -141,7 +141,7 @@ _LEGACY_JSON = """
 
 
 def test_legacy_schema_is_rejected():
-    # tt-kernel is pre-release: exactly one supported schema, no silent half-reads.
+    # tt-model is pre-release: exactly one supported schema, no silent half-reads.
     with pytest.raises(ValueError, match="schema_version"):
         Manifest.from_json(_LEGACY_JSON)
 
