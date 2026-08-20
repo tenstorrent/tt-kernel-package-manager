@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-"""Tests for `tt-kernel clean` — clearing cache subtrees to force a clean state (#2)."""
+"""Tests for `tt-model clean` — clearing cache subtrees to force a clean state (#2)."""
 
 from typer.testing import CliRunner
 

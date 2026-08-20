@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-"""``tt-kernel`` command-line interface."""
+"""``tt-model`` command-line interface."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from typing import List, Optional
 
 import typer
 
-from . import MANIFEST_NAME, TT_KERNEL_CATALOG_TAG, TT_KERNEL_TAG, __version__
+from . import MANIFEST_NAME, TT_MODEL_CATALOG_TAG, TT_MODEL_TAG, __version__
 from . import (
     auth, bundles, cache, device, hub, instances, localdb, metal, packaging,
     resolve as resolve_mod, runtime, toolchain,
@@ -37,7 +37,7 @@ from .manifest import (
 )
 
 app = typer.Typer(
-    name="tt-kernel",
+    name="tt-model",
     help="Publish and pull precompiled tt-metal kernel caches over Hugging Face Hub.",
     no_args_is_help=True,
     add_completion=False,
@@ -93,7 +93,7 @@ def push(
     publish: bool = typer.Option(
         False, "--publish", help="List this bundle in the community catalog (requires "
         "--public). Adds an opt-in tag; the catalog indexes a pointer to your repo — it "
-        "stores nothing and your repo stays under your governance. Delist with `tt-kernel unpublish`."
+        "stores nothing and your repo stays under your governance. Delist with `tt-model unpublish`."
     ),
     cache_dir: Optional[str] = typer.Option(None, help="Override the tt-metal cache root."),
     build_key: Optional[int] = typer.Option(None, help="Which build_key subtree to publish."),
@@ -139,7 +139,7 @@ def push(
     ),
     manifest_path: Optional[str] = typer.Option(
         None, "--manifest", help="For --backend vllm: path to an authored v4 unified manifest "
-        "(entrypoint/platform/runtime/target/mesh/resources). tt-kernel renders "
+        "(entrypoint/platform/runtime/target/mesh/resources). tt-model renders "
         "vllm_metadata.json from it on pull — the author writes one file, not two."
     ),
 ) -> None:
@@ -280,10 +280,10 @@ def push(
         typer.echo(
             f"Uploading {len(files)} files ({manifest.total_size / 1e6:.1f} MB) ..."
         )
-        hub.push_folder(repo_id, staged, commit_message=f"tt-kernel push {manifest.name}")
-        tags = [TT_KERNEL_TAG, dev.arch]
+        hub.push_folder(repo_id, staged, commit_message=f"tt-model push {manifest.name}")
+        tags = [TT_MODEL_TAG, dev.arch]
         if publish:
-            tags.append(TT_KERNEL_CATALOG_TAG)
+            tags.append(TT_MODEL_CATALOG_TAG)
         if capability:
             tags.extend(c.strip().lower() for c in capability if c.strip())
         try:
@@ -296,7 +296,7 @@ def push(
         typer.secho(
             "✓ Listed in the community catalog. It indexes a pointer to this public repo — "
             "it stores none of your content, which stays under your governance. "
-            "Delist any time with `tt-kernel unpublish " + repo_id + "`.",
+            "Delist any time with `tt-model unpublish " + repo_id + "`.",
             fg=typer.colors.GREEN,
         )
 
@@ -309,7 +309,7 @@ def _build_v4_manifest(
 
     The authored file is a *partial* — it declares what the model needs (entrypoint, platform,
     runtime, target, mesh, resources, capabilities, weights, env) but not the bookkeeping
-    tt-kernel owns. We fill the required fields (name, arch, tt_metal_version, device_count,
+    tt-model owns. We fill the required fields (name, arch, tt_metal_version, device_count,
     producer, files, runner) and stamp schema v4. ``--weights`` / ``--arch`` / ``--name`` /
     ``--tt-metal-version`` override the authored values when passed.
     """
@@ -395,7 +395,7 @@ def _push_vllm(
 
     Two authoring modes:
 
-    - ``--manifest`` (v4, recommended): the author writes ONE unified manifest; tt-kernel
+    - ``--manifest`` (v4, recommended): the author writes ONE unified manifest; tt-model
       renders ``vllm_metadata.json`` from it on pull. ``--bundle-dir`` is optional (only needed
       to ship a custom adapter class / extension wheels; omit when the entrypoint is a tt-metal
       built-in).
@@ -426,7 +426,7 @@ def _push_vllm(
         reg_arch = manifest.entrypoint.arch_name
         reg_class = manifest.entrypoint.cls
         pub_arch = manifest.arch
-        tags = [TT_KERNEL_TAG, pub_arch, "vllm"]
+        tags = [TT_MODEL_TAG, pub_arch, "vllm"]
         if manifest.target:
             tags.append(manifest.target.lower())
         if manifest.capabilities:
@@ -480,12 +480,12 @@ def _push_vllm(
             weights=weights_block,
         )
         reg_arch, reg_class, pub_arch = md.arch, md.main_class, dev.arch
-        tags = [TT_KERNEL_TAG, pub_arch, "vllm"]
+        tags = [TT_MODEL_TAG, pub_arch, "vllm"]
         if capability:
             tags.extend(c.strip().lower() for c in capability if c.strip())
 
     if publish:
-        tags.append(TT_KERNEL_CATALOG_TAG)
+        tags.append(TT_MODEL_CATALOG_TAG)
 
     typer.echo(f"Packaging vLLM bundle ({len(files)} file(s)"
                + (", rendered metadata" if manifest_path else "") + ")")
@@ -500,21 +500,21 @@ def _push_vllm(
         hub.create_repo(repo_id, private=private)
         hub.set_visibility(repo_id, private=private)
         typer.echo(f"Uploading {len(files)} files ({manifest.total_size / 1e6:.1f} MB) ...")
-        hub.push_folder(repo_id, staged, commit_message=f"tt-kernel push {manifest.name} (vllm)")
+        hub.push_folder(repo_id, staged, commit_message=f"tt-model push {manifest.name} (vllm)")
         try:
             hub.tag_repo(repo_id, tags)
         except Exception as exc:  # tagging is best-effort
             typer.secho(f"  (could not write tags: {exc})", fg=typer.colors.YELLOW)
 
     typer.secho(f"✓ Pushed vLLM bundle {repo_id}", fg=typer.colors.GREEN)
-    typer.secho(f"  Serve it:  tt-kernel serve {repo_id}", fg=typer.colors.CYAN)
+    typer.secho(f"  Serve it:  tt-model serve {repo_id}", fg=typer.colors.CYAN)
 
 
 # -------------------------------------------------------------------------- package
 def _classify_wheels(wheels_dir: Path) -> dict:
     """Auto-classify the .whl files in a dir by distribution name prefix.
 
-    "Package what's on your box": the author collects their built wheels in one dir and tt-kernel
+    "Package what's on your box": the author collects their built wheels in one dir and tt-model
     sorts them — ``ttnn-*`` -> the engine, ``vllm-*`` (not the plugin) -> base vLLM,
     ``vllm_tt_plugin-*`` -> the plugin, everything else -> extras.
     """
@@ -601,7 +601,7 @@ def package(
     empty-target base vLLM wheel, the vLLM plugin wheel — plus your modified tt-metal-community
     tree, and writes a generated ``install.sh``/``run.sh`` + a v5 manifest. Weights are a POINTER
     (the HF repo id in ``--weights``), never embedded. A consumer then needs only a TT card +
-    firmware: ``tt-kernel pull`` installs the wheels + weights, ``tt-kernel serve`` runs it.
+    firmware: ``tt-model pull`` installs the wheels + weights, ``tt-model serve`` runs it.
     """
     if publish and private:
         raise _err("--publish requires --public (a catalog listing is public by definition).")
@@ -697,7 +697,7 @@ def package(
         if upload_from.exists():
             shutil.rmtree(upload_from)
     else:
-        upload_from = Path(tempfile.mkdtemp(prefix="tt-kernel-pkg-")) / "bundle"
+        upload_from = Path(tempfile.mkdtemp(prefix="tt-model-pkg-")) / "bundle"
     manifest = _stage(upload_from)
     _report(manifest, upload_from)
     if repo_id is None:
@@ -705,23 +705,23 @@ def package(
         return
 
     # Push (git-LFS handles the large wheels automatically).
-    tags = [TT_KERNEL_TAG, manifest.arch, "vllm", "self-contained"]
+    tags = [TT_MODEL_TAG, manifest.arch, "vllm", "self-contained"]
     if mesh_topology:
         tags.append(mesh_topology.lower())
     if publish:
-        tags.append(TT_KERNEL_CATALOG_TAG)
+        tags.append(TT_MODEL_CATALOG_TAG)
     typer.echo(f"Creating repo {repo_id} (private={private})")
     hub.create_repo(repo_id, private=private)
     hub.set_visibility(repo_id, private=private)
     total_mb = sum(w.size for w in manifest.bundled.wheels) / 1e6
     typer.echo(f"Uploading bundle (~{total_mb:.0f} MB of wheels via LFS) ...")
-    hub.push_folder(repo_id, upload_from, commit_message=f"tt-kernel package {manifest.name} (self-contained)")
+    hub.push_folder(repo_id, upload_from, commit_message=f"tt-model package {manifest.name} (self-contained)")
     try:
         hub.tag_repo(repo_id, tags)
     except Exception as exc:  # tagging is best-effort
         typer.secho(f"  (could not write tags: {exc})", fg=typer.colors.YELLOW)
     typer.secho(f"✓ Pushed self-contained bundle {repo_id}", fg=typer.colors.GREEN)
-    typer.secho(f"  Anyone: tt-kernel pull {repo_id} && tt-kernel serve {repo_id}", fg=typer.colors.CYAN)
+    typer.secho(f"  Anyone: tt-model pull {repo_id} && tt-model serve {repo_id}", fg=typer.colors.CYAN)
 
 
 # ---------------------------------------------------------------------------- pull
@@ -735,7 +735,7 @@ def pull(
     models_dir: Optional[str] = typer.Option(None, "--models-dir", help="Where to download weights."),
     bundles_dir: Optional[str] = typer.Option(
         None, "--bundles-dir", help="For a vLLM bundle: where to lay the model folder "
-        "(== EXTRA_MODELS_DIR). Default: $TT_KERNEL_BUNDLES_DIR or ~/.cache/tt-kernel/bundles."
+        "(== EXTRA_MODELS_DIR). Default: $TT_MODEL_BUNDLES_DIR or ~/.cache/tt-model/bundles."
     ),
     with_weights: bool = typer.Option(
         False, "--with-weights", help="For a vLLM bundle: also download the HF weights now "
@@ -772,7 +772,7 @@ def pull(
         snapshot = hub.download_bundle(repo_id, revision, dest=td)
         manifest_path = snapshot / MANIFEST_NAME
         if not manifest_path.is_file():
-            raise _err(f"{repo_id} is not a tt-kernel bundle (no {MANIFEST_NAME}).")
+            raise _err(f"{repo_id} is not a tt-model bundle (no {MANIFEST_NAME}).")
         manifest = Manifest.from_json(manifest_path.read_text())
 
         # v5 self-contained ("fat") bundle: ships its own ttnn/vLLM/plugin wheels. Install the
@@ -886,7 +886,7 @@ def pull(
                                  weights_path=None, last_error=f"pip install failed: {exc}")
                     raise _err(
                         f"Kernels are installed, but the runner pip install failed: {exc}\n"
-                        f"  Re-run `tt-kernel pull {repo_id} --no-weights` to retry just the runner."
+                        f"  Re-run `tt-model pull {repo_id} --no-weights` to retry just the runner."
                     )
             else:
                 # Reference runner: nothing ships in the bundle; confirm it's importable.
@@ -917,7 +917,7 @@ def pull(
                 raise _err(
                     f"Kernels{' and runner' if runner_installed else ''} installed, but the "
                     f"weights download failed: {exc}\n"
-                    f"  Re-run `tt-kernel pull {repo_id}` to resume the download."
+                    f"  Re-run `tt-model pull {repo_id}` to resume the download."
                 )
 
     _record_pull(repo_id, manifest, out_root, runner_installed=runner_installed,
@@ -931,7 +931,7 @@ def pull(
                     fg=typer.colors.CYAN)
         if not runtime.legacy_serve_available():
             typer.secho("  (the legacy-runner server needs fastapi + uvicorn: "
-                        "pip install 'tt-kernel[serve]')",
+                        "pip install 'tt-model[serve]')",
                         fg=typer.colors.YELLOW)
     elif manifest.runner:
         missing = []
@@ -1011,7 +1011,7 @@ def _select_instance(manifest, *, arch, instance_override, force):
     if instance_override:
         match = next((i for i in instances.all_instances() if i.name == instance_override), None)
         if match is None:
-            raise _err(f"--instance {instance_override!r} not found. See `tt-kernel instances list`.")
+            raise _err(f"--instance {instance_override!r} not found. See `tt-model instances list`.")
         chosen, v = match, instances.probe_versions(match)
     else:
         result = instances.select(ttnn=ttnn, vllm=vllm, plugin=plugin)
@@ -1023,7 +1023,7 @@ def _select_instance(manifest, *, arch, instance_override, force):
                             fg=typer.colors.YELLOW)
             if not force:
                 raise _err("No installed tt-metal instance satisfies this model's ranges. "
-                           "Install/register one (`tt-kernel instances add`), or --force to "
+                           "Install/register one (`tt-model instances add`), or --force to "
                            "install against the active environment anyway.")
             chosen = instances.active_instance()
             v = instances.probe_versions(chosen)
@@ -1105,7 +1105,7 @@ def _install_self_contained(
     if not weights_path and manifest.weights:
         typer.secho(f"  (weights fetched at serve time from {manifest.weights.repo_id}; "
                     "pass --with-weights to pre-download)", fg=typer.colors.CYAN)
-    typer.secho(f"  Serve:  tt-kernel serve {repo_id}", fg=typer.colors.CYAN)
+    typer.secho(f"  Serve:  tt-model serve {repo_id}", fg=typer.colors.CYAN)
 
 
 def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional[List[str]] = None) -> None:
@@ -1117,7 +1117,7 @@ def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional
     run_script = entry.get("run_script")
     if not run_script or not Path(run_script).is_file():
         raise _err(f"Self-contained bundle for {entry.get('repo_id')} is missing its run.sh "
-                   f"({run_script}). Re-run `tt-kernel pull {entry.get('repo_id')}`.")
+                   f"({run_script}). Re-run `tt-model pull {entry.get('repo_id')}`.")
     argv = ["bash", str(run_script), *(extra_args or [])]
     typer.secho(f"[vLLM self-contained: {entry.get('repo_id')} via {run_script}]", fg=typer.colors.CYAN)
     if print_only:
@@ -1154,7 +1154,7 @@ def _install_vllm_bundle(
 
     # Integrity-verify whatever source the bundle actually ships (adapter code + wheels, and
     # for the legacy path the author-written vllm_metadata.json). For a v4 bundle the plugin
-    # file is rendered by tt-kernel, not shipped, so it is simply absent from the index.
+    # file is rendered by tt-model, not shipped, so it is simply absent from the index.
     bundle_entries = [f for f in manifest.files if f.path.startswith(f"{subdir}/")]
     # Fail closed: a shipped folder that the manifest doesn't index would otherwise be copied
     # into EXTRA_MODELS_DIR (which the plugin imports as Python) with NO integrity check — the
@@ -1162,7 +1162,7 @@ def _install_vllm_bundle(
     if staged.is_dir() and any(staged.iterdir()) and not bundle_entries:
         raise _err(
             f"Bundle ships a {subdir}/ folder but the manifest indexes no files for it — "
-            "refusing to install unverified code. Re-publish with a current tt-kernel."
+            "refusing to install unverified code. Re-publish with a current tt-model."
         )
     if bundle_entries:
         typer.echo(f"Verifying {len(bundle_entries)} bundle file(s) ...")
@@ -1178,14 +1178,14 @@ def _install_vllm_bundle(
     key = bundles.model_key(repo_id)
 
     if manifest.is_v4:
-        # v4: tt-kernel is the source of truth — lay down any shipped code, then RENDER
+        # v4: tt-model is the source of truth — lay down any shipped code, then RENDER
         # vllm_metadata.json from the one authoritative manifest. `is_v4` is true for a
         # platform-only manifest too, but rendering needs an entrypoint — guard it with a
         # clean CLI error instead of letting render_vllm_metadata raise a raw ValueError.
         if manifest.entrypoint is None:
             raise _err(
                 "v4 bundle manifest has no 'entrypoint' — cannot render vllm_metadata.json. "
-                "The bundle is malformed; re-publish it with a current tt-kernel."
+                "The bundle is malformed; re-publish it with a current tt-model."
             )
         if staged.is_dir():
             dest = bundles.install_bundle(staged, bdir, key)
@@ -1221,7 +1221,7 @@ def _install_vllm_bundle(
                  weights_path=weights_path, last_error=None, bundle_path=str(dest),
                  instance=selected)
     typer.secho(f"✓ Installed {repo_id}", fg=typer.colors.GREEN)
-    typer.secho(f"  Serve it:  tt-kernel serve {repo_id}", fg=typer.colors.CYAN)
+    typer.secho(f"  Serve it:  tt-model serve {repo_id}", fg=typer.colors.CYAN)
 
 
 # --------------------------------------------------------------------- instances
@@ -1265,7 +1265,7 @@ def instances_list(
     for home, py in instances.scan_checkouts():
         if py is None:
             typer.secho(f"[scan] {home}: found but no interpreter (build/python_env missing) — "
-                        "register manually with `tt-kernel instances add`", fg=typer.colors.YELLOW)
+                        "register manually with `tt-model instances add`", fg=typer.colors.YELLOW)
 
 
 @instances_app.command("add")
@@ -1388,7 +1388,7 @@ def _report_bundle_requirements(repo_id: str, arch: Optional[str]) -> bool:
             typer.secho(f"  → would link to instance: {result.reason}", fg=typer.colors.GREEN)
         else:
             typer.secho(f"  → no instance selectable: {result.reason} "
-                        "(register one with `tt-kernel instances add`)", fg=typer.colors.YELLOW)
+                        "(register one with `tt-model instances add`)", fg=typer.colors.YELLOW)
 
 
 @app.command()
@@ -1400,7 +1400,7 @@ def doctor(
     arch: Optional[str] = typer.Option(None, "--arch", help="Override arch detection."),
 ) -> None:
     """Report whether the surrounding toolchain (tt-metal, vLLM)
-    and hardware are adequate. tt-kernel never installs these — it only checks and warns.
+    and hardware are adequate. tt-model never installs these — it only checks and warns.
 
     With a bundle id, also resolves that bundle's v4 version ranges against the local
     environment and prints what (if anything) is out of range.
@@ -1445,7 +1445,7 @@ def _handoff(argv: List[str], *, print_only: bool, why: str) -> None:
     if not runtime.legacy_serve_available():
         raise _err(
             "Cannot serve: the legacy-runner server needs fastapi + uvicorn "
-            "(pip install 'tt-kernel[serve]'). Use `--print` to emit the command."
+            "(pip install 'tt-model[serve]'). Use `--print` to emit the command."
         )
     try:
         raise typer.Exit(code=subprocess.run(argv).returncode)
@@ -1481,7 +1481,7 @@ def _ensure_vllm_pulled(repo_id: str, revision: Optional[str], *, arch: Optional
         snapshot = hub.download_bundle(repo_id, revision, dest=td)
         mpath = snapshot / MANIFEST_NAME
         if not mpath.is_file():
-            raise _err(f"{repo_id} is not a tt-kernel bundle (no {MANIFEST_NAME}).")
+            raise _err(f"{repo_id} is not a tt-model bundle (no {MANIFEST_NAME}).")
         manifest = Manifest.from_json(mpath.read_text())
         if not (manifest.runner and manifest.runner.is_vllm):
             raise _err(f"{repo_id} is not a vLLM bundle.")
@@ -1506,7 +1506,7 @@ def _serve_activation(entry: dict, *, instance_override: Optional[str]):
     if instance_override:
         match = next((i for i in instances.all_instances() if i.name == instance_override), None)
         if match is None:
-            raise _err(f"--instance {instance_override!r} not found. See `tt-kernel instances list`.")
+            raise _err(f"--instance {instance_override!r} not found. See `tt-model instances list`.")
         return match.python, match.activation_env(), match.name
 
     py = entry.get("instance_python")
@@ -1526,7 +1526,7 @@ def _serve_activation(entry: dict, *, instance_override: Optional[str]):
             typer.secho(f"  re-resolved -> {result.chosen.name}", fg=typer.colors.CYAN)
             return result.chosen.python, result.chosen.activation_env(), result.chosen.name
         typer.secho("  ! no instance satisfies the ranges; using the active environment "
-                    "(consider `tt-kernel pull` again).", fg=typer.colors.YELLOW)
+                    "(consider `tt-model pull` again).", fg=typer.colors.YELLOW)
     return None, {}, None
 
 
@@ -1544,7 +1544,7 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
 
     bundle_path = Path(entry["bundle_path"])
     if not bundle_path.is_dir():
-        raise _err(f"Installed bundle folder is missing: {bundle_path}. Re-run `tt-kernel pull {repo_id}`.")
+        raise _err(f"Installed bundle folder is missing: {bundle_path}. Re-run `tt-model pull {repo_id}`.")
     extra_models_dir = bundle_path.parent  # == EXTRA_MODELS_DIR (holds this model folder)
     md = bundles.read_vllm_metadata(bundle_path)
     mkey, launch = bundles.select_launch(md, arch)
@@ -1606,7 +1606,7 @@ def serve(
     bundles_dir: Optional[str] = typer.Option(None, "--bundles-dir", help="Override EXTRA_MODELS_DIR location."),
     instance: Optional[str] = typer.Option(
         None, "--instance", help="Force a registered tt-metal instance by name (see "
-        "`tt-kernel instances list`), overriding the pinned/auto-resolved one."
+        "`tt-model instances list`), overriding the pinned/auto-resolved one."
     ),
     health_check: bool = typer.Option(False, "--health-check", help="(reserved) probe the server after launch."),
 ) -> None:
@@ -1650,7 +1650,7 @@ def serve(
 @app.command()
 def run(
     repo_id: str = typer.Argument(
-        ..., help="Model to run: a tt-kernel bundle id (namespace/name[@rev]) or a bare HF model id."
+        ..., help="Model to run: a tt-model bundle id (namespace/name[@rev]) or a bare HF model id."
     ),
     print_only: bool = typer.Option(
         False, "--print", help="Print the serve command instead of executing it."
@@ -1661,11 +1661,11 @@ def run(
 ) -> None:
     """Serve a model through the right path.
 
-    - **vLLM bundle** -> the Tenstorrent vLLM plugin (the default; same as `tt-kernel serve`).
+    - **vLLM bundle** -> the Tenstorrent vLLM plugin (the default; same as `tt-model serve`).
     - **legacy runner bundle** (a runner following the legacy contract in
-      docs/authoring_runners.md), once installed -> tt-kernel's own OpenAI-compatible
+      docs/authoring_runners.md), once installed -> tt-model's own OpenAI-compatible
       legacy-runner server (`tt_kernel.legacy_serve`).
-    - anything else (kernels-only bundle, or a bare HF repo) -> not servable by tt-kernel;
+    - anything else (kernels-only bundle, or a bare HF repo) -> not servable by tt-model;
       publish a vLLM bundle.
 
     The old dynamic dispatch path (`tt_api.serve`) is retired.
@@ -1680,7 +1680,7 @@ def run(
                     arch=None, bundles_dir=None, do_health=False)
         return
 
-    # Legacy runner bundle -> tt-kernel's legacy-runner server. It needs the runner
+    # Legacy runner bundle -> tt-model's legacy-runner server. It needs the runner
     # installed and the weights on disk, so it only works once the bundle is pulled.
     if res.has_runner:
         if res.installed and res.weights_path:
@@ -1692,22 +1692,22 @@ def run(
         if res.installed:
             raise _err(
                 f"{repo_id} is installed but its weights are not on disk. Re-run "
-                f"`tt-kernel pull {repo_id}` (without --no-weights) so the runner can load."
+                f"`tt-model pull {repo_id}` (without --no-weights) so the runner can load."
             )
         typer.secho(
-            f"A tt-kernel bundle exists for {repo_id} (legacy runner {res.runner_spec}).",
+            f"A tt-model bundle exists for {repo_id} (legacy runner {res.runner_spec}).",
             fg=typer.colors.YELLOW,
         )
-        typer.secho(f"  Install it first:  tt-kernel pull {repo_id}", fg=typer.colors.YELLOW)
-        typer.secho("  then `tt-kernel run` serves it via the legacy-runner server.",
+        typer.secho(f"  Install it first:  tt-model pull {repo_id}", fg=typer.colors.YELLOW)
+        typer.secho("  then `tt-model run` serves it via the legacy-runner server.",
                     fg=typer.colors.YELLOW)
         return
 
     # No runner (kernels-only bundle, or a bare HF repo): the dynamic dispatch path is
-    # retired. tt-kernel serves vLLM bundles and legacy-runner bundles only.
+    # retired. tt-model serves vLLM bundles and legacy-runner bundles only.
     raise _err(
-        f"Nothing to serve for {repo_id}. tt-kernel serves vLLM bundles "
-        f"(`tt-kernel serve <id>`) and legacy-runner bundles. To serve this model, publish "
+        f"Nothing to serve for {repo_id}. tt-model serves vLLM bundles "
+        f"(`tt-model serve <id>`) and legacy-runner bundles. To serve this model, publish "
         "it as a vLLM bundle — see docs/authoring_runners.md."
     )
 
@@ -1753,7 +1753,7 @@ def list_installed() -> None:
 # -------------------------------------------------------------------------- search
 @app.command()
 def search(
-    query: str = typer.Argument("", help="Free-text query over tt-kernel cache repos."),
+    query: str = typer.Argument("", help="Free-text query over tt-model cache repos."),
     limit: int = typer.Option(50, help="Max results."),
     catalog: bool = typer.Option(
         False, "--catalog", help="Restrict to repos listed in the community catalog "
@@ -1768,7 +1768,7 @@ def search(
     ),
     as_json: bool = typer.Option(False, "--json", help="Emit JSON."),
 ) -> None:
-    """Search the Hub for published tt-kernel caches."""
+    """Search the Hub for published tt-model caches."""
     extra_tags = [t.lower() for t in (arch, target) if t]
     results = hub.search(query, limit=limit, catalog_only=catalog, tags=extra_tags)
     if as_json:
@@ -1791,12 +1791,12 @@ def publish(
 
     Use this to add a bundle you pushed earlier without ``--publish``. The catalog only
     ever holds a pointer to your public HF repo; it stores none of your content, and your
-    repo stays entirely under your governance. Delist with ``tt-kernel unpublish``.
+    repo stays entirely under your governance. Delist with ``tt-model unpublish``.
     """
     try:
         if hub.is_private(repo_id):
             raise _err(f"{repo_id} is private; the catalog is public. Make it public first "
-                       "(`tt-kernel push ... --public`) before listing.")
+                       "(`tt-model push ... --public`) before listing.")
     except typer.Exit:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -1804,7 +1804,7 @@ def publish(
     hub.set_catalog_listing(repo_id, listed=True)
     typer.secho(
         f"✓ Listed {repo_id} in the community catalog (pointer only; content stays yours). "
-        f"Delist with `tt-kernel unpublish {repo_id}`.",
+        f"Delist with `tt-model unpublish {repo_id}`.",
         fg=typer.colors.GREEN,
     )
 
@@ -1885,11 +1885,11 @@ def clean(
     run on a build shares one subtree — so to produce a model-specific bundle you must start
     from a clean cache. Use this to wipe a stale subtree (or all of them) first:
 
-      tt-kernel clean --build-key N            # remove one build_key subtree
-      tt-kernel clean --all                    # remove every build_key subtree
-      tt-kernel clean --all --cache-dir DIR    # ... under a specific cache root
+      tt-model clean --build-key N            # remove one build_key subtree
+      tt-model clean --all                    # remove every build_key subtree
+      tt-model clean --all --cache-dir DIR    # ... under a specific cache root
 
-    For removing an *installed bundle* (and its index entry), use `tt-kernel rm` instead.
+    For removing an *installed bundle* (and its index entry), use `tt-model rm` instead.
     """
     if all_keys and build_key is not None:
         raise _err("Pass either --build-key N or --all, not both.")
@@ -1930,7 +1930,7 @@ def _split_revision(repo_id: str) -> "tuple[str, Optional[str]]":
 
 @app.command()
 def version() -> None:
-    """Print the tt-kernel version."""
+    """Print the tt-model version."""
     typer.echo(__version__)
 
 

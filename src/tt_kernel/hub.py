@@ -4,7 +4,7 @@
 """Hugging Face Hub I/O. All storage, auth, visibility, LFS, and search live here.
 
 Each bundle is one HF model repo (``repo_type="model"``) named ``namespace/name`` and
-tagged ``tt-kernel-cache`` so ``search`` can filter for it.
+tagged ``tt-model-cache`` so ``search`` can filter for it.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from . import MANIFEST_NAME, TT_KERNEL_CATALOG_TAG, TT_KERNEL_TAG
+from . import MANIFEST_NAME, TT_MODEL_CATALOG_TAG, TT_MODEL_TAG
 from .manifest import Manifest
 
 _REPO_TYPE = "model"
@@ -70,8 +70,8 @@ def set_catalog_listing(repo_id: str, listed: bool) -> None:
     """Add or remove the community-catalog tag on a repo's model card.
 
     Listing is a deliberate opt-in, separate from ``push``: the web catalog shows only
-    repos carrying ``TT_KERNEL_CATALOG_TAG``. Removing it delists the repo from the
-    catalog on the next crawl (the repo and its content are untouched — tt-kernel only
+    repos carrying ``TT_MODEL_CATALOG_TAG``. Removing it delists the repo from the
+    catalog on the next crawl (the repo and its content are untouched — tt-model only
     ever flips a pointer tag; the repo stays under its owner's governance).
     """
     from huggingface_hub import ModelCard, ModelCardData
@@ -82,9 +82,9 @@ def set_catalog_listing(repo_id: str, listed: bool) -> None:
         card = ModelCard("")
     tags = set(getattr(card.data, "tags", None) or [])
     if listed:
-        tags.add(TT_KERNEL_CATALOG_TAG)
+        tags.add(TT_MODEL_CATALOG_TAG)
     else:
-        tags.discard(TT_KERNEL_CATALOG_TAG)
+        tags.discard(TT_MODEL_CATALOG_TAG)
     card.data = ModelCardData(tags=sorted(tags))
     card.push_to_hub(repo_id, repo_type=_REPO_TYPE)
 
@@ -121,7 +121,7 @@ def search(
     catalog_only: bool = False,
     tags: Optional[List[str]] = None,
 ) -> List[dict]:
-    """List tt-kernel cache repos matching a query, newest first.
+    """List tt-model cache repos matching a query, newest first.
 
     ``catalog_only`` restricts to repos opted into the community catalog (the same set the
     web frontend shows) rather than every pushed cache bundle. ``tags`` are additional repo
@@ -129,7 +129,7 @@ def search(
     (``p150x4``) written by ``push`` — so a consumer can ask "what runs on my box".
     """
     api = _api()
-    base = TT_KERNEL_CATALOG_TAG if catalog_only else TT_KERNEL_TAG
+    base = TT_MODEL_CATALOG_TAG if catalog_only else TT_MODEL_TAG
     # list_models ANDs a list of filter tags; a lone string works too.
     filter_tags = [base] + [t for t in (tags or []) if t]
     results = api.list_models(

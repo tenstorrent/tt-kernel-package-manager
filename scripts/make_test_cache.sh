@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Generate a synthetic tt-metal kernel cache for testing tt-kernel without hardware.
+# Generate a synthetic tt-metal kernel cache for testing tt-model without hardware.
 #
 # Lays out the real on-disk structure (jit_compile_server.cpp:109-120). The build dir
-# is named "tt-metal-cache<build_key>": with --cache-dir/TT_METAL_CACHE set, tt-kernel
+# is named "tt-metal-cache<build_key>": with --cache-dir/TT_METAL_CACHE set, tt-model
 # glues the build_key onto the "tt-metal-cache" prefix, so the build dirs are siblings
 # directly under ROOT (see cache.py resolve_out_root / _parent_and_prefix).
 #   <root>/tt-metal-cache<build_key>/kernels/<kernel_name>/<target>/<files>
@@ -69,12 +69,12 @@ PYEOF
   echo "Created fake runner wheel: $WHEEL"
   echo
   echo "Push a v2 bundle (kernels + runner + weights) with:"
-  echo "  tt-kernel push <ns>/<name> --private --cache-dir \"$ROOT\" --arch blackhole \\"
+  echo "  tt-model push <ns>/<name> --private --cache-dir \"$ROOT\" --arch blackhole \\"
   echo "    --tt-metal-version v0.99-test \\"
   echo "    --python-package \"$WHEEL\" --runner-spec fake_runner:Runner --entry-point demo \\"
   echo "    --weights org/model"
 else
   echo "Push it with:"
-  echo "  tt-kernel push <ns>/<name> --private --cache-dir \"$ROOT\" --arch blackhole \\"
+  echo "  tt-model push <ns>/<name> --private --cache-dir \"$ROOT\" --arch blackhole \\"
   echo "    --tt-metal-version v0.99-test --model google/gemma-test"
 fi

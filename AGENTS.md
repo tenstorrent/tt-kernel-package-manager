@@ -1,7 +1,7 @@
-# AGENTS.md — guidelines for automated (agent) contributions to tt-kernel
+# AGENTS.md — guidelines for automated (agent) contributions to tt-model
 
 This file tells an AI agent (e.g. Claude Code) how to make and submit improvement PRs to
-`tt-kernel-package-manager` so fixes stay consistent with the design. Read it before changing
+`tt-model-manager` so fixes stay consistent with the design. Read it before changing
 code. Human contributors: see [CONTRIBUTING.md](CONTRIBUTING.md); this is the agent-facing
 supplement, and the invariants below are binding for everyone.
 
@@ -10,12 +10,12 @@ supplement, and the invariants below are binding for everyone.
 **draft** for human review; a human clicks merge.
 
 ## Design invariants — do not break these
-tt-kernel exists to ship *self-contained* model packages over HuggingFace. A change that
+tt-model exists to ship *self-contained* model packages over HuggingFace. A change that
 violates one of these is wrong even if tests pass:
 
-1. **tt-kernel is the standalone path.** The full flow — `package → push → pull → install →
-   serve` — MUST work with tt-kernel alone (only a TT card + firmware). Never add a dependency
-   on `tt-cli`; tt-cli is an *optional* wrapper that calls tt-kernel, not the reverse.
+1. **tt-model is the standalone path.** The full flow — `package → push → pull → install →
+   serve` — MUST work with tt-model alone (only a TT card + firmware). Never add a dependency
+   on `tt-cli`; tt-cli is an *optional* wrapper that calls tt-model, not the reverse.
 2. **Distribution is HuggingFace, not GitHub Releases.** Bundles are HF `model` repos; large
    binaries go to git-LFS via `hub.upload_folder`. Do not add Release-based or ad-hoc download flows.
 3. **Weights are a pointer, never embedded** (`WeightsRef` = HF repo id). Do not stage weights

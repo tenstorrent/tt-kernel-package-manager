@@ -14,11 +14,11 @@ of the batching, paging, or performance of the vLLM path. Prefer authoring a vLL
 (see the top of ``docs/authoring_runners.md``). This exists so an author who already built
 a legacy runner is not stranded.
 
-Run it directly, or let ``tt-kernel run <installed-dispatch-bundle>`` build the command:
+Run it directly, or let ``tt-model run <installed-dispatch-bundle>`` build the command:
 
     python -m tt_kernel.legacy_serve --runner pkg.mod:Runner --model /path/to/weights
 
-Requires ``fastapi`` + ``uvicorn`` (``pip install 'tt-kernel[serve]'``) and, at runtime,
+Requires ``fastapi`` + ``uvicorn`` (``pip install 'tt-model[serve]'``) and, at runtime,
 ``ttnn`` and the runner's package in the environment.
 """
 
@@ -106,7 +106,7 @@ def build_app(runner: Any, *, model_name: str, default_max_tokens: int):
     from fastapi import FastAPI
     from fastapi.responses import JSONResponse, StreamingResponse
 
-    app = FastAPI(title="tt-kernel legacy runner server")
+    app = FastAPI(title="tt-model legacy runner server")
     community = bool(getattr(runner, "_community", False))
 
     @app.get("/v1/models")
@@ -192,14 +192,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     except ImportError as exc:  # pragma: no cover — env-dependent
         raise SystemExit(
             f"legacy_serve needs fastapi + uvicorn ({exc}). Install with: "
-            "pip install 'tt-kernel[serve]'"
+            "pip install 'tt-model[serve]'"
         )
     device_ids = [int(x) for x in str(args.device_ids).split(",") if x.strip() != ""]
     name = args.served_model_name or args.model
-    print(f"[tt-kernel legacy_serve] loading runner {args.runner} on model {args.model} ...")
+    print(f"[tt-model legacy_serve] loading runner {args.runner} on model {args.model} ...")
     runner = build_runner(args.runner, args.model, device_ids=device_ids)
     app = build_app(runner, model_name=name, default_max_tokens=args.max_new_tokens)
-    print(f"[tt-kernel legacy_serve] OpenAI endpoint: http://{args.host}:{args.port}/v1")
+    print(f"[tt-model legacy_serve] OpenAI endpoint: http://{args.host}:{args.port}/v1")
     import uvicorn
     uvicorn.run(app, host=args.host, port=args.port)
 

@@ -5,3 +5,7 @@ __pycache__/
 .pytest_cache/
 build/
 dist/
+
+# runtime artifacts (never commit)
+model_cache/
+generated/

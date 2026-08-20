@@ -191,13 +191,13 @@ def publish_warnings(out_root: str, build_key: int, *, default_cache: bool) -> L
         warnings.append(
             f"cache root also holds build_key(s) {others}; publishing only {build_key}. "
             "If this is a shared cache, the subtree may mix kernels from multiple models. "
-            "Warm a fresh --cache-dir for a model-specific bundle (see `tt-kernel clean`)."
+            "Warm a fresh --cache-dir for a model-specific bundle (see `tt-model clean`)."
         )
     if default_cache:
         warnings.append(
             f"publishing from the default shared cache ({out_root}); every model compiled "
             "on this build shares this build_key. Use a fresh --cache-dir (or run "
-            "`tt-kernel clean` first) for a model-specific bundle."
+            "`tt-model clean` first) for a model-specific bundle."
         )
     return warnings
 

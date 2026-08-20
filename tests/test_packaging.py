@@ -98,7 +98,7 @@ def test_stage_package_layout(tmp_path):
 
 
 def test_cli_package_stage_only(tmp_path):
-    """`tt-kernel package ... --out <dir>` (no repo_id) stages the folder, no network."""
+    """`tt-model package ... --out <dir>` (no repo_id) stages the folder, no network."""
     wheels = tmp_path / "w"
     wheels.mkdir()
     _fake_wheel(wheels, "ttnn-0.75.0-cp312-cp312-linux_x86_64.whl", b"ttnn")

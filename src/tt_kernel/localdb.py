@@ -3,7 +3,7 @@
 
 """A tiny local index of installed bundles, for ``list`` and ``rm``.
 
-Stored at ``~/.cache/tt-kernel/installed.json``. This is a convenience record only —
+Stored at ``~/.cache/tt-model/installed.json``. This is a convenience record only —
 the source of truth for what's usable is always the tt-metal cache on disk.
 """
 
@@ -17,7 +17,7 @@ from typing import Dict, List, Optional
 
 def _index_path() -> Path:
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
-    return Path(base) / "tt-kernel" / "installed.json"
+    return Path(base) / "tt-model" / "installed.json"
 
 
 def _load() -> Dict[str, dict]:

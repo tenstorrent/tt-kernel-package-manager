@@ -4,7 +4,7 @@ A **self-contained bundle** ships the platform *inside* the package: the author'
 wheel (custom C++/LLK kernels compiled in), optionally the base vLLM + plugin wheels, and their
 modified `tt-metal-community` tree — plus a generated `install.sh`/`run.sh` and a v5 manifest.
 Weights stay a **pointer** (an HF repo id), downloaded at pull. A consumer needs only a TT card +
-firmware. `tt-kernel` alone does the whole job — no tt-cli, no pre-provisioned tt-metal/vLLM.
+firmware. `tt-model` alone does the whole job — no tt-cli, no pre-provisioned tt-metal/vLLM.
 
 ## User flow
 
@@ -12,7 +12,7 @@ firmware. `tt-kernel` alone does the whole job — no tt-cli, no pre-provisioned
 Build/bring up your model on `tt-metal-community` (your ttnn wheel now carries your kernels), then:
 
 ```bash
-tt-kernel package <your-org>/<model-name> \        # HF target is a POSITIONAL arg (omit + --out to stage locally)
+tt-model package <your-org>/<model-name> \        # HF target is a POSITIONAL arg (omit + --out to stage locally)
   --from-metal .                                   # your modified tt-metal-community tree
   --ttnn-wheel dist/ttnn-*.whl                      # your built engine wheel (required)
   --vllm-wheel dist/vllm-*.whl                      # optional: empty-target base vLLM
@@ -33,9 +33,9 @@ repo (the "running folder"): `wheels/`, `metal/`, `install.sh`, `run.sh`, a per-
 
 ### Consumer — pull + serve (only a card + firmware required)
 ```bash
-tt-kernel pull  <org>/<model-name>     # installs the shipped wheels into the bundle's OWN venv,
+tt-model pull  <org>/<model-name>     # installs the shipped wheels into the bundle's OWN venv,
                                         # (optionally --with-weights) downloads the weights
-tt-kernel serve <org>/<model-name>     # runs the bundle's run.sh in that venv (OpenAI endpoint)
+tt-model serve <org>/<model-name>     # runs the bundle's run.sh in that venv (OpenAI endpoint)
 ```
 `serve` also install-then-serves a not-yet-pulled bundle. Everything runs from the bundle's venv;
 the host's tt-metal/vLLM (if any) is never touched.
@@ -55,7 +55,7 @@ pytest                                     # full suite (expected: 201 passed, 1
 Validates the real round-trip. Stage locally, install, and serve:
 ```bash
 # 1. stage a bundle from a built ttnn wheel + a metal-community tree
-tt-kernel package --from-metal <community-clone> --ttnn-wheel <ttnn.whl> \
+tt-model package --from-metal <community-clone> --ttnn-wheel <ttnn.whl> \
   --arch blackhole --arch-name LlamaForCausalLM \
   --main-class models.tt_transformers.tt.generator_vllm:LlamaForCausalLM \
   --weights unsloth/Llama-3.2-3B-Instruct --mesh P150 --out /tmp/bundle

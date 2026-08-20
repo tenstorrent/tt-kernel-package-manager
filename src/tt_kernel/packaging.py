@@ -125,7 +125,7 @@ def render_install_sh() -> str:
     """A self-contained installer: make a venv, install the shipped wheels, then the deps.
 
     Path-relative and idempotent so it works wherever ``pull`` materializes the folder. Takes an
-    optional venv path as ``$1`` (default ``./venv``) so a caller (tt-kernel pull) can point it at
+    optional venv path as ``$1`` (default ``./venv``) so a caller (tt-model pull) can point it at
     a managed location.
     """
     return f"""#!/usr/bin/env bash
@@ -151,7 +151,7 @@ def render_run_sh(manifest: Manifest) -> str:
     Sets the non-obvious env this stack needs (LD_PRELOAD of _ttnncpp.so; TT_METAL_HOME at the
     installed ttnn; EXTRA_MODELS_DIR at this folder so the plugin finds vllm_metadata.json;
     single-chip fabric-off defaults) plus any model-specific ``manifest.env``, then launches vLLM.
-    Works with only tt-kernel absent — ``tt-kernel serve`` is the managed path, this is the raw one.
+    Works with only tt-model absent — ``tt-model serve`` is the managed path, this is the raw one.
     """
     weights = manifest.weights.repo_id if manifest.weights else ""
     mesh_device = (manifest.mesh.topology if manifest.mesh and manifest.mesh.topology else "") or ""

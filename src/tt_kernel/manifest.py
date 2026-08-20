@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-"""The compatibility manifest — the correctness core of tt-kernel.
+"""The compatibility manifest — the correctness core of tt-model.
 
 A manifest pins everything the cached binaries depend on so that ``pull`` can refuse
 an install that would silently miss (or, worse, load wrong binaries). It records the
@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 # published to the Hub keeps installing unchanged (see SUPPORTED_SCHEMAS).
 SCHEMA_VERSION = "5"
 
-# Every schema version this tt-kernel can read. v5 is the self-contained ("fat") schema: it adds
+# Every schema version this tt-model can read. v5 is the self-contained ("fat") schema: it adds
 # a ``bundled`` block recording the platform wheels (ttnn/vllm/plugin) the author's box shipped
 # INSIDE the bundle, so a consumer needs only a TT card + firmware. v4 is the unified "model +
 # manifest" schema (structured target/mesh/ranges/resources — vLLM only, host-provisioned
@@ -74,7 +74,7 @@ class RunnerPayload(BaseModel):
     with it, which runner contract the payload satisfies:
 
     - ``backend == "dispatch"`` (default, legacy): a Python runner following the legacy
-      contract (``generate()``/``generate_stream()``/``benchmark()``), served by tt-kernel's
+      contract (``generate()``/``generate_stream()``/``benchmark()``), served by tt-model's
       own legacy-runner server (``tt_kernel.legacy_serve``). Two modes:
 
       - **packaged**: ``wheels`` is non-empty — the wheel(s) are stored under ``python/``
@@ -84,12 +84,12 @@ class RunnerPayload(BaseModel):
         expected to already have it or to install it from ``source``.
 
       ``spec`` is the opaque ``"module:Class"`` string the legacy-runner server loads;
-      tt-kernel records it but never imports it.
+      tt-model records it but never imports it.
 
     - ``backend == "vllm"``: the model is served through the Tenstorrent vLLM plugin. The
       payload is a self-contained bundle *folder* (``bundle_dir``) holding a plugin-owned
       ``vllm_metadata.json`` (arch name, main-class path, per-machine launch command, HF
-      weights ref) plus the ``VllmGeneratorAdapter`` class and its dependencies. tt-kernel
+      weights ref) plus the ``VllmGeneratorAdapter`` class and its dependencies. tt-model
       lays the folder into ``EXTRA_MODELS_DIR`` at serve time; the plugin scans it and
       registers the model. ``vllm_metadata.json`` — not this payload — is the source of
       truth for the serving contract, so ``spec``/``wheels`` are unused for vLLM.
@@ -240,7 +240,7 @@ class Entrypoint(BaseModel):
 class Resources(BaseModel):
     """Structured launch knobs the renderer turns into vLLM args.
 
-    Declarative-with-escape-hatch: the common knobs are structured so tt-kernel can validate
+    Declarative-with-escape-hatch: the common knobs are structured so tt-model can validate
     and search on them, while ``command_override`` / ``extra_args`` let an author bypass or
     extend composition without waiting for a new field per vLLM flag.
     """
@@ -288,7 +288,7 @@ class Manifest(BaseModel):
     weights: Optional[WeightsRef] = None
 
     # --- v4 unified-manifest blocks (all optional; absent => a v3 bundle) -------------------
-    # These describe a kernels-less vLLM model in one authoritative document. tt-kernel renders
+    # These describe a kernels-less vLLM model in one authoritative document. tt-model renders
     # the plugin-owned ``vllm_metadata.json`` from them at pull/serve; ``compare()`` gates on
     # the ranges in ``platform``/``runtime``. A v3 bundle leaves them all None and behaves
     # exactly as before.
@@ -325,16 +325,16 @@ class Manifest(BaseModel):
     def from_json(cls, text: str) -> "Manifest":
         """Parse and validate a manifest, rejecting any unsupported schema version.
 
-        This tt-kernel reads every schema in ``SUPPORTED_SCHEMAS`` (currently v3 legacy
+        This tt-model reads every schema in ``SUPPORTED_SCHEMAS`` (currently v3 legacy
         kernel-cache and v4 unified vLLM). A bundle on any other version is refused outright
-        rather than silently half-read — re-publish it with a matching tt-kernel.
+        rather than silently half-read — re-publish it with a matching tt-model.
         """
         m = cls.model_validate_json(text)
         if m.schema_version not in SUPPORTED_SCHEMAS:
             supported = ", ".join(sorted(SUPPORTED_SCHEMAS))
             raise ValueError(
-                f"Unsupported bundle schema_version {m.schema_version!r}; this tt-kernel "
-                f"reads schema(s) {supported}. Re-publish the bundle with a current tt-kernel."
+                f"Unsupported bundle schema_version {m.schema_version!r}; this tt-model "
+                f"reads schema(s) {supported}. Re-publish the bundle with a current tt-model."
             )
         return m
 

@@ -1,16 +1,16 @@
-# tt-kernel
+# tt-model
 
-> ⚠️ **Experimental — no support, no guarantees.** tt-kernel is an early, experimental
+> ⚠️ **Experimental — no support, no guarantees.** tt-model is an early, experimental
 > project. Nothing here is officially supported, and we make no claim of correctness,
 > stability, or fitness for any purpose. APIs, the bundle format, and behavior may change
 > or break at any time without notice. Use it at your own risk.
 
-`tt-kernel` distributes models over the Hugging Face Hub and serves them on Tenstorrent
+`tt-model` distributes models over the Hugging Face Hub and serves them on Tenstorrent
 hardware. The **default serving path is the Tenstorrent vLLM plugin** — an OpenAI-compatible
 server. One command pulls a model and brings the server up:
 
 ```bash
-tt-kernel serve <namespace>/<model>     # pull the bundle, register it with vLLM, launch the server
+tt-model serve <namespace>/<model>     # pull the bundle, register it with vLLM, launch the server
 ```
 
 ### vLLM bundles (the default)
@@ -27,16 +27,16 @@ a bundle** — only referenced by their HF repo id. To author one, see
 
 ### Kernel-cache bundles (legacy dispatch path)
 
-`tt-kernel` also publishes and pulls **precompiled tt-metal kernel caches** for the older
+`tt-model` also publishes and pulls **precompiled tt-metal kernel caches** for the older
 "dispatch" serving runtime (`tt_api.serve`), so a model's first run is a cache **hit** instead
 of a slow JIT recompile. tt-metal JIT-compiles every kernel on first run and caches the RISC-V
 binaries; they are deterministic for a fixed `(tt-metal build, arch, device config,
-compile-time args)` tuple. `tt-kernel` packages that cache, publishes it as an HF model repo
+compile-time args)` tuple. `tt-model` packages that cache, publishes it as an HF model repo
 addressed `namespace/name`, and validates compatibility before installing it locally. See
 [Kernel-cache bundles (legacy)](#kernel-cache-bundles-kernels--runner--weights-legacy-dispatch-path)
 below.
 
-`tt-kernel serve` (and `tt-kernel run`) is the **front door**: it resolves whether a bundle
+`tt-model serve` (and `tt-model run`) is the **front door**: it resolves whether a bundle
 exists and routes accordingly — the vLLM plugin by default, the dispatch runtime for a
 kernel-cache bundle, or the dynamic runtime on a bare Hugging Face repo. Custom implementations
 win; nothing overrides them.
@@ -44,63 +44,63 @@ win; nothing overrides them.
 ## Install
 
 ```bash
-pip install tt-kernel        # from this repo: pip install -e .
+pip install tt-model        # from this repo: pip install -e .
 ```
 
 To serve, you also need the Tenstorrent **vLLM fork + plugin** on top of a working tt-metal
-env. `scripts/install.sh` sets up the whole serving stack (vLLM fork + plugin + tt-kernel) and
-runs `tt-kernel doctor`:
+env. `scripts/install.sh` sets up the whole serving stack (vLLM fork + plugin + tt-model) and
+runs `tt-model doctor`:
 
 ```bash
-scripts/install.sh           # installs fork + plugin + tt-kernel into the tt-metal venv
+scripts/install.sh           # installs fork + plugin + tt-model into the tt-metal venv
 ```
 
 ## Usage
 
 ```bash
-tt-kernel login                                   # reuses huggingface_hub's token store
-tt-kernel doctor                                  # check tt-metal/tt-lang/vLLM + hardware
+tt-model login                                   # reuses huggingface_hub's token store
+tt-model doctor                                  # check tt-metal/tt-lang/vLLM + hardware
 
 # vLLM (default) — serve a model through the Tenstorrent vLLM plugin
-tt-kernel serve you/mymodel                        # pull if needed, register, launch the OpenAI server
-tt-kernel serve you/mymodel --print                # print the launch command instead of running it
-tt-kernel push  you/mymodel --backend vllm \       # publish a vLLM bundle from a v4 manifest
+tt-model serve you/mymodel                        # pull if needed, register, launch the OpenAI server
+tt-model serve you/mymodel --print                # print the launch command instead of running it
+tt-model push  you/mymodel --backend vllm \       # publish a vLLM bundle from a v4 manifest
   --manifest ./model.json --bundle-dir ./adapter   # (--bundle-dir optional for built-ins)
 
 # Shared / discovery
-tt-kernel pull  you/mymodel                        # download + install a bundle locally
-tt-kernel info  you/mymodel                        # manifest + compatibility verdict
-tt-kernel search gemma                             # discover published bundles
-tt-kernel search gemma --catalog                   # only bundles listed in the community catalog
-tt-kernel search --target p150x4 --arch blackhole  # "what runs on my box" (v4 tags)
-tt-kernel list                                     # locally installed bundles
-tt-kernel rm    you/mymodel                        # remove an installed bundle
+tt-model pull  you/mymodel                        # download + install a bundle locally
+tt-model info  you/mymodel                        # manifest + compatibility verdict
+tt-model search gemma                             # discover published bundles
+tt-model search gemma --catalog                   # only bundles listed in the community catalog
+tt-model search --target p150x4 --arch blackhole  # "what runs on my box" (v4 tags)
+tt-model list                                     # locally installed bundles
+tt-model rm    you/mymodel                        # remove an installed bundle
 
 # tt-metal instances (which build serves a v4 model)
-tt-kernel instances list --for you/mymodel         # installed builds + which satisfy the model
-tt-kernel instances add --name metal-0.73 \        # register a build auto-scan can't find
+tt-model instances list --for you/mymodel         # installed builds + which satisfy the model
+tt-model instances add --name metal-0.73 \        # register a build auto-scan can't find
   --python /opt/tt/0.73/venv/bin/python --tt-metal-home /opt/tt/0.73
 
 # Kernel-cache (legacy dispatch path) — see below
-tt-kernel run   you/smallmodel-blackholex1         # dispatch runtime + precompiled cache
-tt-kernel clean --all                              # wipe cache subtrees for a clean producer state
+tt-model run   you/smallmodel-blackholex1         # dispatch runtime + precompiled cache
+tt-model clean --all                              # wipe cache subtrees for a clean producer state
 ```
 
 ## Serving with vLLM (the default)
 
-`tt-kernel serve <id>` is the one-command path. It pulls the bundle folder if it isn't already
+`tt-model serve <id>` is the one-command path. It pulls the bundle folder if it isn't already
 installed, lays it into the local bundles directory, points the vLLM plugin at that directory
 via `EXTRA_MODELS_DIR`, and launches the OpenAI-compatible server with the bundle's
 per-machine launch command:
 
 ```bash
-tt-kernel serve you/mymodel                   # pull-if-needed -> register -> launch; prints the endpoint
-tt-kernel serve you/mymodel --print           # emit the exact launch command + env instead of running
-tt-kernel serve you/mymodel --local-only      # require an installed bundle; never hit the Hub
-tt-kernel serve you/mymodel --bundles-dir DIR # override the EXTRA_MODELS_DIR location
+tt-model serve you/mymodel                   # pull-if-needed -> register -> launch; prints the endpoint
+tt-model serve you/mymodel --print           # emit the exact launch command + env instead of running
+tt-model serve you/mymodel --local-only      # require an installed bundle; never hit the Hub
+tt-model serve you/mymodel --bundles-dir DIR # override the EXTRA_MODELS_DIR location
 ```
 
-Repeat invocations skip the pull and go straight to launch. `tt-kernel run <id>` routes a vLLM
+Repeat invocations skip the pull and go straight to launch. `tt-model run <id>` routes a vLLM
 bundle to this same path.
 
 ### Publishing a vLLM bundle
@@ -111,21 +111,21 @@ no weights are shipped. See **[docs/authoring_runners.md](docs/authoring_runners
 metadata schema and the adapter contract.
 
 ```bash
-# v4 (recommended): author one manifest; tt-kernel renders vllm_metadata.json on pull
-tt-kernel push you/mymodel --private --backend vllm \
+# v4 (recommended): author one manifest; tt-model renders vllm_metadata.json on pull
+tt-model push you/mymodel --private --backend vllm \
   --manifest ./model.json \                # unified manifest (entrypoint/platform/runtime/…)
   --bundle-dir ./adapter                    # optional: custom adapter class + extension wheels
 
 # legacy: ship a hand-written vllm_metadata.json verbatim
-tt-kernel push you/mymodel --private --backend vllm \
+tt-model push you/mymodel --private --backend vllm \
   --bundle-dir ./bundle --weights some-org/mymodel
 
-tt-kernel pull you/mymodel                  # lay the folder into the local bundles dir
-tt-kernel pull you/mymodel --with-weights   # ...and also pre-download the weights (default: skip)
+tt-model pull you/mymodel                  # lay the folder into the local bundles dir
+tt-model pull you/mymodel --with-weights   # ...and also pre-download the weights (default: skip)
 ```
 
 The plugin auto-registers every bundle it finds under `EXTRA_MODELS_DIR`, so no per-model edit
-to the plugin is required. `vllm_metadata.json` is owned by the plugin; `tt-kernel` ships it
+to the plugin is required. `vllm_metadata.json` is owned by the plugin; `tt-model` ships it
 verbatim and reads only the architecture and the per-machine launch command.
 
 ## Kernel-cache bundles (kernels + runner + weights, legacy dispatch path)
@@ -142,13 +142,13 @@ runner that doesn't follow the contract won't install or serve.
 
 ```bash
 # Producer (on a host whose kernel cache is populated, with the runner wheel built):
-tt-kernel push you/mymodel-blackhole --private \
+tt-model push you/mymodel-blackhole --private \
   --python-package dist/ttrunner_mymodel-0.1-py3-none-any.whl \
   --runner-spec ttrunner_mymodel.runner:MyRunner \
   --weights some-org/mymodel
 
 # Consumer:
-tt-kernel pull you/mymodel-blackhole       # kernels + pip-install runner + download weights
+tt-model pull you/mymodel-blackhole       # kernels + pip-install runner + download weights
 #   -> prints the exact `serve --unsafe --runner ...` command to run
 ```
 
@@ -157,15 +157,15 @@ tt-kernel pull you/mymodel-blackhole       # kernels + pip-install runner + down
 
 **Version coupling:** the runner and the kernels are co-versioned (the kernels were compiled
 from the tt-metal build whose `ttnn` the runner calls). A kernel-version mismatch hard-blocks;
-the runner/weights install anyway with a warning. `tt-kernel` does not fix a mismatch — build
+the runner/weights install anyway with a warning. `tt-model` does not fix a mismatch — build
 and serve on the same tt-metal build. See the guide for details.
 
 ## The front door: `serve` and `run`
 
-For a vLLM bundle, [`tt-kernel serve <id>`](#serving-with-vllm-the-default) is the default and
+For a vLLM bundle, [`tt-model serve <id>`](#serving-with-vllm-the-default) is the default and
 the recommended entry point.
 
-`tt-kernel run <id>` is the general resolver. It routes a **vLLM bundle to the vLLM plugin**
+`tt-model run <id>` is the general resolver. It routes a **vLLM bundle to the vLLM plugin**
 (the same path as `serve`); anything else falls down the legacy **dispatch three-tier ladder** —
 a curated kernel-cache bundle always wins, and a bare Hugging Face repo falls through to the
 dynamic dispatch runtime. A completely custom implementation is therefore never overridden.
@@ -178,17 +178,17 @@ dynamic dispatch runtime. A completely custom implementation is therefore never 
 | **3 — no bundle** | a bare HF id / local path | the dynamic dispatch runtime on the model as-is |
 
 ```bash
-tt-kernel serve you/mymodel                  # vLLM bundle -> the plugin (default)
-tt-kernel run   you/mymodel-blackhole        # kernel-cache bundle -> author's runner + kernels (dispatch)
-tt-kernel run   meta-llama/Llama-3.1-8B      # no bundle -> dynamic dispatch runtime on the bare repo
-tt-kernel run   you/mymodel --print          # print the serve command instead of executing
-tt-kernel run   you/mymodel --local-only     # resolve only against installed bundles (no Hub call)
+tt-model serve you/mymodel                  # vLLM bundle -> the plugin (default)
+tt-model run   you/mymodel-blackhole        # kernel-cache bundle -> author's runner + kernels (dispatch)
+tt-model run   meta-llama/Llama-3.1-8B      # no bundle -> dynamic dispatch runtime on the bare repo
+tt-model run   you/mymodel --print          # print the serve command instead of executing
+tt-model run   you/mymodel --local-only     # resolve only against installed bundles (no Hub call)
 ```
 
 On the legacy dispatch path, when a tuned bundle is **published but not installed**, `run`
-tells you it exists (`tt-kernel pull <id>` to use it) and then does exactly what you asked —
+tells you it exists (`tt-model pull <id>` to use it) and then does exactly what you asked —
 running the dynamic path on the bare repo rather than silently downloading. That handoff
-targets the dispatch runtime (`tt_api.serve`); `tt-kernel` only *detects* that package, never
+targets the dispatch runtime (`tt_api.serve`); `tt-model` only *detects* that package, never
 imports it — the runner spec is an opaque string.
 
 ## Community catalog (web front end)
@@ -201,23 +201,23 @@ Every card is a pointer to a public HF repo that remains under its author's gove
 Listing is an explicit opt-in, separate from `push`:
 
 ```bash
-tt-kernel push you/mymodel-blackhole --public --publish   # push and list in one step
-tt-kernel publish   you/mymodel-blackhole                  # list a repo pushed earlier
-tt-kernel unpublish you/mymodel-blackhole                  # delist (repo untouched)
+tt-model push you/mymodel-blackhole --public --publish   # push and list in one step
+tt-model publish   you/mymodel-blackhole                  # list a repo pushed earlier
+tt-model unpublish you/mymodel-blackhole                  # delist (repo untouched)
 ```
 
-`--publish` requires `--public` and adds the `tt-kernel-catalog` tag; the catalog shows only
+`--publish` requires `--public` and adds the `tt-model-catalog` tag; the catalog shows only
 repos carrying it. Deploy the front end by copying `web/` to any static server — no backend,
 no build step. See **[web/README.md](web/README.md)**.
 
 ## Checking your toolchain
 
-`tt-kernel` expects the serving stack — tt-metal and the vLLM fork + plugin — to already be
+`tt-model` expects the serving stack — tt-metal and the vLLM fork + plugin — to already be
 present on the system. It does **not** install them (use `scripts/install.sh` for that); it
 checks they are adequate and warns when they are not.
 
 ```bash
-tt-kernel doctor
+tt-model doctor
 ```
 
 ```
@@ -239,7 +239,7 @@ before it bites.
 ## How compatibility is enforced
 
 A cached binary is only valid when the consumer's environment matches the producer's.
-`tt-kernel` records this in `tt_kernel_manifest.json` and checks it on `pull`:
+`tt-model` records this in `tt_kernel_manifest.json` and checks it on `pull`:
 
 | Field | Source of truth | On mismatch |
 |-------|-----------------|-------------|
@@ -252,15 +252,15 @@ A cached binary is only valid when the consumer's environment matches the produc
 `platform.ttnn` (e.g. `>=0.72,<0.76`), `runtime.version` (vLLM core, e.g. `>=0.24`), and
 `runtime.plugin_version` (the `vllm_tt_plugin` package) as PEP 440 specifiers. On `pull`, an
 installed version outside a range is a **forceable** block (`--force` overrides), never fatal;
-`arch` stays fatal; a bare git-sha checkout is treated as "assume OK". `tt-kernel doctor <id>`
+`arch` stays fatal; a bare git-sha checkout is treated as "assume OK". `tt-model doctor <id>`
 reports the required-vs-installed verdict declaratively — it never installs.
 
 **Multiple tt-metal builds → the instance registry.** When several tt-metal builds are on a
 host, `pull` selects the **newest installed instance that satisfies the manifest's ranges** and
 pins its activation (interpreter + `TT_METAL_HOME`/`PYTHONPATH`/`LD_LIBRARY_PATH`); `serve`
 launches under that exact build. Instances come from the active interpreter, a manager-owned
-registry (`~/.config/tt-kernel/instances.json`), and an auto-scan — manage them with
-`tt-kernel instances list|add|remove|scan` and override per-command with `--instance`. See
+registry (`~/.config/tt-model/instances.json`), and an auto-scan — manage them with
+`tt-model instances list|add|remove|scan` and override per-command with `--instance`. See
 **[docs/authoring_runners.md](docs/authoring_runners.md)**.
 
 `build_key` (which names the on-disk cache subtree, `<cache_root>/<build_key>/`) is
@@ -298,27 +298,27 @@ scripts/make_test_cache.sh /tmp/ttk-test-cache 4242
 
 # 2. Auth (use your own current HF token)
 export HF_TOKEN=hf_...
-tt-kernel login
+tt-model login
 
 # 3. Publish it — --arch and --tt-metal-version stand in for hardware/build detection
-tt-kernel push <you>/kernel-selftest --private \
+tt-model push <you>/kernel-selftest --private \
   --cache-dir /tmp/ttk-test-cache --arch blackhole \
   --tt-metal-version v0.99-test
 
 # 4. Inspect + compatibility verdict
-tt-kernel info <you>/kernel-selftest --arch blackhole
+tt-model info <you>/kernel-selftest --arch blackhole
 
 # 5. Pull into a DIFFERENT empty cache dir (simulates another machine)
-tt-kernel pull <you>/kernel-selftest --cache-dir /tmp/ttk-restore --arch blackhole
+tt-model pull <you>/kernel-selftest --cache-dir /tmp/ttk-restore --arch blackhole
 diff -r /tmp/ttk-test-cache/tt-metal-cache4242 /tmp/ttk-restore/tt-metal-cache4242 \
   && echo "round-trip OK"
 
 # 6. Local bookkeeping + teardown
-tt-kernel list
-tt-kernel rm <you>/kernel-selftest --cache-dir /tmp/ttk-restore
+tt-model list
+tt-model rm <you>/kernel-selftest --cache-dir /tmp/ttk-restore
 ```
 
-Try the guard rails too: `tt-kernel pull ... --arch wormhole_b0` fails fatally
+Try the guard rails too: `tt-model pull ... --arch wormhole_b0` fails fatally
 (wrong ISA), and a `--tt-metal-version` that differs from the bundle's blocks the
 install until you add `--force`.
 

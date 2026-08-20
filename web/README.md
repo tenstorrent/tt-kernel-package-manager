@@ -1,14 +1,14 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-# tt-kernel catalog (web)
+# tt-model catalog (web)
 
-A searchable, browsable front end for community-published tt-kernel bundles — like
+A searchable, browsable front end for community-published tt-model bundles — like
 `ollama.com/models`, but backed entirely by the Hugging Face Hub.
 
 ## What it is (and what it is not)
 
 This is a **pure index**. It is a static site (HTML + CSS + one vanilla-JS file) that, from
 the *visitor's own browser*, queries the Hugging Face Hub public API for model repos carrying
-the opt-in tag `tt-kernel-catalog` and renders them as searchable cards.
+the opt-in tag `tt-model-catalog` and renders them as searchable cards.
 
 - **It hosts nothing.** No kernels, no weights, no manifests, no user data live on this
   server. The browser fetches everything live from `huggingface.co`.
@@ -25,13 +25,13 @@ Because of this, hosting the catalog is just serving three static files.
 Listing is an explicit opt-in by the author, separate from a plain `push`:
 
 ```bash
-tt-kernel push you/mymodel-blackhole --public --publish   # push + list in one go
-tt-kernel publish you/mymodel-blackhole                    # list a repo pushed earlier
-tt-kernel unpublish you/mymodel-blackhole                  # delist (repo untouched)
+tt-model push you/mymodel-blackhole --public --publish   # push + list in one go
+tt-model publish you/mymodel-blackhole                    # list a repo pushed earlier
+tt-model unpublish you/mymodel-blackhole                  # delist (repo untouched)
 ```
 
 `--publish` requires `--public` (a private repo cannot be indexed). It adds the
-`tt-kernel-catalog` tag to the repo's model card; the catalog shows only repos with that tag.
+`tt-model-catalog` tag to the repo's model card; the catalog shows only repos with that tag.
 Delisting removes the tag — the bundle drops off on the next page load. The repo and its
 content are never modified by (un)publishing beyond that one tag.
 
@@ -44,7 +44,7 @@ Copy this folder to any static web server. No build step, no backend, no runtime
 cd web && python3 -m http.server 8080     # then open http://localhost:8080
 
 # Behind nginx
-#   root /srv/tt-kernel-catalog;   # (the contents of this web/ folder)
+#   root /srv/tt-model-catalog;   # (the contents of this web/ folder)
 #   index index.html;
 ```
 
@@ -58,7 +58,7 @@ Edit [`config.js`](config.js). Common tweaks:
 
 | Key | Meaning |
 |-----|---------|
-| `CATALOG_TAG` | The opt-in tag. Must match `tt_kernel.TT_KERNEL_CATALOG_TAG`. |
+| `CATALOG_TAG` | The opt-in tag. Must match `tt_kernel.TT_MODEL_CATALOG_TAG`. |
 | `HF_ORIGIN` | Point at an HF mirror if you run one. |
 | `LIST_LIMIT` | Max repos pulled from the list endpoint. |
 | `ENRICH_CONCURRENCY` | Parallel manifest fetches for rich card details. |
@@ -66,21 +66,21 @@ Edit [`config.js`](config.js). Common tweaks:
 
 ## How it works
 
-1. **List** — `GET {HF}/api/models?filter=tt-kernel-catalog&full=true` returns the tagged
+1. **List** — `GET {HF}/api/models?filter=tt-model-catalog&full=true` returns the tagged
    repos with downloads, last-modified, and tags. Arch **and model capabilities** are read
    straight from the tags, so those badges and filter chips render immediately with no
    per-repo fetch.
 2. **Enrich** — in the background, with limited concurrency, each repo's
    `resolve/main/tt_kernel_manifest.json` is fetched to fill in kernel count, tt-metal
    version, and whether it carries a runner (the one feature filter).
-3. **Detail** — clicking a card opens a drawer led by the `tt-kernel pull` command
+3. **Detail** — clicking a card opens a drawer led by the `tt-model pull` command
    (the primary action), the full manifest, `info`/`run` commands, and a secondary link to
    the source HF repo.
 
 **Capability tags.** A producer marks model capabilities at push time:
 
 ```bash
-tt-kernel push you/mixtral-blackhole --public --publish \
+tt-model push you/mixtral-blackhole --public --publish \
   --capability moe --capability sliding-window-attention
 ```
 

@@ -44,7 +44,7 @@ def _staged_bundle(tmp_path):
 
 def _isolate(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))  # localdb
-    monkeypatch.setenv("TT_KERNEL_MODELS_DIR", str(tmp_path / "models"))  # install dir
+    monkeypatch.setenv("TT_MODEL_MODELS_DIR", str(tmp_path / "models"))  # install dir
     monkeypatch.setattr(metal, "local_env", lambda **k: metal.LocalEnv(arch="blackhole", device_count=1))
 
 
