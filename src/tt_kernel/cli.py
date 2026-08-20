@@ -85,11 +85,66 @@ def login(
         raise _err("Login did not produce a valid identity.")
 
 
+def _ensure_repo(repo_id: str, private: Optional[bool], *, publish: bool = False) -> None:
+    """Make sure ``repo_id`` exists, without ever changing visibility as a side effect.
+
+    ``private`` is deliberately tri-state:
+
+    - ``None``  — the user said nothing. A push is a *content* operation, so an existing
+      repo keeps whatever visibility it has. (Previously the flag was a plain ``bool``
+      defaulting to ``False`` and ``set_visibility`` ran on every push, so a bare
+      ``tt-kernel push you/private-model`` silently published a private repo.)
+    - ``True`` / ``False`` — the user passed ``--private`` / ``--public`` and means it. We
+      honour it and print what changed, so a visibility flip is never invisible.
+
+    At *creation* time there is no prior state to preserve, so the flag (or the documented
+    public default) simply becomes the new repo's visibility.
+    """
+    if not hub.repo_exists(repo_id):
+        typer.echo(f"Creating repo {repo_id} ({'private' if private else 'public'})")
+        hub.create_repo(repo_id, private=bool(private))
+        return
+
+    # The repo already exists and belongs to whoever set its visibility.
+    if private is None:
+        # A catalog listing is public by definition. Rather than quietly flipping the repo
+        # (the exact bug this function exists to prevent), make the user say --public.
+        if publish and _is_private_or_unknown(repo_id):
+            raise _err(
+                f"{repo_id} already exists and is private, but --publish lists it in the "
+                "public community catalog. Re-run with --public to make it public (tt-kernel "
+                "will not change visibility unless you ask), or drop --publish to push privately."
+            )
+        typer.echo(f"Repo {repo_id} exists; leaving its visibility unchanged")
+        return
+
+    want = "private" if private else "public"
+    if hub.is_private_safe(repo_id) is private:
+        typer.echo(f"Repo {repo_id} exists and is already {want}")
+        return
+    hub.set_visibility(repo_id, private=private)
+    typer.secho(f"! Changed visibility of {repo_id} to {want} (as requested)",
+                fg=typer.colors.YELLOW)
+
+
+def _is_private_or_unknown(repo_id: str) -> bool:
+    """True unless we can positively confirm the repo is public.
+
+    Used only to gate ``--publish``: if the Hub will not tell us, err toward asking the user
+    instead of assuming a repo is safe to list.
+    """
+    return hub.is_private_safe(repo_id) is not False
+
+
 # ---------------------------------------------------------------------------- push
 @app.command()
 def push(
     repo_id: str = typer.Argument(..., help="Target repo as namespace/name."),
-    private: bool = typer.Option(False, "--private/--public", help="Repo visibility."),
+    private: Optional[bool] = typer.Option(
+        None, "--private/--public", help="Repo visibility. Applied when the repo is CREATED "
+        "(new repos default to public). For a repo that already exists, passing the flag "
+        "changes its visibility and says so; omitting it leaves visibility exactly as it is."
+    ),
     publish: bool = typer.Option(
         False, "--publish", help="List this bundle in the community catalog (requires "
         "--public). Adds an opt-in tag; the catalog indexes a pointer to your repo — it "
@@ -153,8 +208,10 @@ def push(
     ``VllmGeneratorAdapter`` class + deps) as a **kernels-less** bundle — no precompiled cache
     is shipped; the vLLM plugin JITs at first-run warmup.
     """
-    # A catalog listing is public by definition — refuse to list a private repo.
-    if publish and private:
+    # A catalog listing is public by definition — refuse to list a private repo. (An
+    # *unspecified* visibility is resolved later, in _ensure_repo, where we know whether the
+    # repo already exists and what it currently is.)
+    if publish and private is True:
         raise _err("--publish lists the bundle in the public community catalog and requires "
                    "--public. Re-run with --public, or drop --publish to push privately.")
 
@@ -266,7 +323,7 @@ def push(
     with tempfile.TemporaryDirectory() as td:
         staged = Path(td)
         # Mirror the subtree under <staged>/<build_key>/ so it installs cleanly.
-        shutil.copytree(subtree, staged / str(key))
+        shutil.copytree(subtree, staged / str(key), ignore=cache.ignore_junk)
         # Ship the runner wheel(s) under python/ (uploaded automatically by upload_folder).
         if wheel_paths:
             (staged / "python").mkdir()
@@ -274,9 +331,7 @@ def push(
                 shutil.copy2(p, staged / "python" / p.name)
         (staged / MANIFEST_NAME).write_text(manifest.to_json())
 
-        typer.echo(f"Creating repo {repo_id} (private={private})")
-        hub.create_repo(repo_id, private=private)
-        hub.set_visibility(repo_id, private=private)
+        _ensure_repo(repo_id, private, publish=publish)
         typer.echo(
             f"Uploading {len(files)} files ({manifest.total_size / 1e6:.1f} MB) ..."
         )
@@ -377,7 +432,7 @@ def _build_v4_manifest(
 def _push_vllm(
     repo_id: str,
     *,
-    private: bool,
+    private: Optional[bool],  # tri-state; see _ensure_repo
     publish: bool,
     bundle_dir: Optional[str],
     manifest_path: Optional[str],
@@ -493,12 +548,10 @@ def _push_vllm(
     with tempfile.TemporaryDirectory() as td:
         staged = Path(td)
         if folder is not None:
-            shutil.copytree(folder, staged / subdir)
+            shutil.copytree(folder, staged / subdir, ignore=cache.ignore_junk)
         (staged / MANIFEST_NAME).write_text(manifest.to_json())
 
-        typer.echo(f"Creating repo {repo_id} (private={private})")
-        hub.create_repo(repo_id, private=private)
-        hub.set_visibility(repo_id, private=private)
+        _ensure_repo(repo_id, private, publish=publish)
         typer.echo(f"Uploading {len(files)} files ({manifest.total_size / 1e6:.1f} MB) ...")
         hub.push_folder(repo_id, staged, commit_message=f"tt-model push {manifest.name} (vllm)")
         try:

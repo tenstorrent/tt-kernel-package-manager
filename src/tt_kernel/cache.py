@@ -120,17 +120,48 @@ def sha256_file(path: Path) -> str:
     return _sha256_file(path)
 
 
+# Build/tool droppings that must never be published inside a bundle. `--bundle-dir` points
+# at a working directory the author has been running code from, so it normally contains a
+# `__pycache__/` full of stale bytecode compiled against whatever interpreter was handy —
+# uploading that ships confusing garbage (and, with .git, potentially far more than intended).
+_JUNK_NAMES = frozenset({
+    "__pycache__", ".git", ".hg", ".svn",
+    ".mypy_cache", ".pytest_cache", ".ruff_cache", ".ipynb_checkpoints",
+    ".DS_Store", "Thumbs.db",
+})
+_JUNK_SUFFIXES = (".pyc", ".pyo")
+
+
+def is_junk(name: str) -> bool:
+    """True for a path component that should never be packaged (see ``_JUNK_NAMES``)."""
+    return name in _JUNK_NAMES or name.endswith(_JUNK_SUFFIXES)
+
+
+def ignore_junk(directory: str, names: List[str]) -> set:
+    """``shutil.copytree(ignore=...)`` callback matching :func:`index_subtree`'s filter.
+
+    The staged copy and the manifest index must exclude exactly the same files, or the
+    manifest ends up describing a bundle that differs from the one uploaded.
+    """
+    return {n for n in names if is_junk(n)}
+
+
 def index_subtree(subtree: Path) -> List[FileEntry]:
     """Walk a ``<build_key>/`` subtree, returning a sha256 index of every file.
 
     Paths are stored relative to the subtree root so they can be re-rooted on install.
+    Junk (bytecode caches, VCS metadata — see :func:`is_junk`) is skipped, matching what
+    :func:`ignore_junk` keeps out of the staged copy that actually gets uploaded.
     """
     entries: List[FileEntry] = []
     for path in sorted(subtree.rglob("*")):
         if path.is_file():
+            rel = path.relative_to(subtree)
+            if any(is_junk(part) for part in rel.parts):
+                continue
             entries.append(
                 FileEntry(
-                    path=str(path.relative_to(subtree)),
+                    path=str(rel),
                     sha256=_sha256_file(path),
                     size=path.stat().st_size,
                 )
