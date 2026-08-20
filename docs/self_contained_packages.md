@@ -90,3 +90,15 @@ The full loop — `package` → push to HF → `pull` (install-the-platform into
 `serve` (vLLM OpenAI endpoint) → `curl` a chat completion — was run on a Blackhole p150 and
 returned coherent output. The fixes above (metadata subfolder, `HF_MODEL` export, serving-arg
 defaults, `_ttnncpp.so` in the wheel, `find_spec` preload) all come from that run.
+
+## Compatibility: the old `tt-kernel` name still works
+The command was renamed `tt-kernel` → `tt-model`. For anyone already on the old name:
+- **`tt-kernel …` still runs** (a deprecated console-script alias for `tt-model`); it prints a
+  one-line note to stderr pointing at `tt-model`.
+- **`TT_KERNEL_*` env vars are still honored** as a fallback for their `TT_MODEL_*` replacements.
+- **An existing `~/.cache|.config/tt-kernel` dir is reused** when the new `tt-model` one doesn't
+  exist yet, so a pre-rename install keeps finding its bundles/instances/index.
+- **Bundles published with the old tool still install** — the on-disk manifest is unchanged
+  (`tt_kernel_manifest.json`), and every prior schema version is still read.
+
+These shims are deprecated; switch to `tt-model` when convenient.
