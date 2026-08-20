@@ -89,3 +89,95 @@ def test_doctor_ok(monkeypatch):
     res = runner.invoke(cli.app, ["doctor"])
     assert res.exit_code == 0, res.output
     assert "toolchain adequate" in res.output
+
+
+# ------------------------------------------- environment coherence (pip check)
+_PIP_CHECK_REAL = (
+    'opencv-python-headless 5.0.0.93 has requirement numpy>=2; python_version >= "3.9", '
+    "but you have numpy 1.26.4.\n"
+)
+
+
+def _fake_pip(monkeypatch, stdout, returncode=1):
+    import subprocess as sp
+
+    class R:
+        pass
+
+    def run(*a, **k):
+        r = R()
+        r.returncode, r.stdout, r.stderr = returncode, stdout, ""
+        return r
+
+    monkeypatch.setattr(sp, "run", run)
+
+
+def test_parses_the_real_pip_check_wording(monkeypatch):
+    """Captured from the venv in the bug report. Note pip says "has requirement", not
+    "requires" — matching only the latter silently found zero conflicts on an environment
+    pip had just called broken."""
+    _fake_pip(monkeypatch, _PIP_CHECK_REAL)
+    conflicts = toolchain.check_environment()
+    assert len(conflicts) == 1
+    c = conflicts[0]
+    assert c.package == "opencv-python-headless"
+    assert c.requirement == 'numpy>=2; python_version >= "3.9"'
+    assert c.installed == "numpy 1.26.4"
+    assert "numpy>=2" in c.message
+
+
+def test_parses_the_other_pip_wording(monkeypatch):
+    _fake_pip(monkeypatch, "foo 1.0 requires bar>=2, but you have bar 1.0.\n")
+    assert toolchain.check_environment()[0].package == "foo"
+
+
+def test_requirement_containing_a_comma_is_not_truncated(monkeypatch):
+    """"numpy>=1.24,<2" is one requirement. Splitting on the first comma would report it
+    as "numpy>=1.24" and quietly understate the constraint."""
+    _fake_pip(monkeypatch, "foo 1.0 has requirement numpy>=1.24,<2, but you have numpy 2.1.\n")
+    c = toolchain.check_environment()[0]
+    assert c.requirement == "numpy>=1.24,<2"
+
+
+def test_missing_dependency_records_no_installed_version(monkeypatch):
+    _fake_pip(monkeypatch, "foo 1.0 requires bar, but you have bar not installed.\n")
+    c = toolchain.check_environment()[0]
+    assert c.installed is None
+    assert "not installed" in c.message
+
+
+def test_clean_environment_reports_nothing(monkeypatch):
+    _fake_pip(monkeypatch, "", returncode=0)
+    assert toolchain.check_environment() == []
+
+
+def test_unparseable_output_does_not_invent_conflicts(monkeypatch):
+    _fake_pip(monkeypatch, "something entirely unexpected\n")
+    assert toolchain.check_environment() == []
+
+
+def test_pip_unavailable_is_not_a_conflict(monkeypatch):
+    """An unavailable check is not a passing check, but it is also not a conflict we can
+    name — so report nothing rather than a fabricated problem."""
+    import subprocess as sp
+
+    def boom(*a, **k):
+        raise OSError("no pip")
+
+    monkeypatch.setattr(sp, "run", boom)
+    assert toolchain.check_environment() == []
+
+
+def test_doctor_surfaces_a_conflict_without_claiming_plain_adequacy(monkeypatch):
+    """The bug: pip printed a hard ERROR about numpy and `doctor` printed
+    "✓ toolchain adequate" immediately after. Advisory, so still exit 0 — but never
+    an unqualified claim of adequacy."""
+    from tt_kernel import cli
+
+    monkeypatch.setattr(toolchain, "check_environment", lambda *a, **k: [
+        toolchain.EnvConflict("opencv-python-headless", "numpy>=2", "numpy 1.26.4")])
+    res = runner.invoke(cli.app, ["doctor"])
+    assert "opencv-python-headless" in res.output
+    assert "environment conflict" in res.output
+    if res.exit_code == 0:
+        assert "✓ toolchain adequate —" in res.output

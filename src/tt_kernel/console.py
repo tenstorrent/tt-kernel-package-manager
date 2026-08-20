@@ -514,3 +514,53 @@ def set_no_color(value=True):
         return
     console = Console(theme=THEME, highlight=False, soft_wrap=False, no_color=True)
     _real_console = Console(theme=THEME, file=sys.__stdout__, highlight=False, no_color=True)
+
+
+def check_table():
+    """A borderless table for check/verdict rows (`doctor`, install's Verify).
+
+    Rich owns the column widths here rather than f-string padding: a version like
+    `0.1.dev14190+g24516a94b.empty` is 29 characters and blew a hand-padded layout onto a
+    wrapped line, which is exactly the unreadable run-on this replaces.
+    """
+    table = Table(box=None, show_header=False, pad_edge=False, padding=(0, 1), expand=False)
+    # Column priority matters on a narrow terminal. Rich shrinks columns to fit, and left
+    # to itself it squeezed the verdict glyph away entirely at COLUMNS=40 — losing the one
+    # character the row exists to convey. So the glyph and the component name are fixed,
+    # and the requirement column is the only one allowed to give: it folds, then truncates.
+    table.add_column(no_wrap=True, min_width=1, width=1)               # ✓ / ✗ / !
+    table.add_column(no_wrap=True, min_width=4)                        # component
+    table.add_column(no_wrap=True, overflow="ellipsis", max_width=18)  # what we found
+    table.add_column(style="muted", overflow="fold", ratio=1, min_width=0)  # requirement
+    return table
+
+
+def print_table(table, indent=2):
+    """Print a check table indented as a block, wrapped cells included.
+
+    Indent via Padding, never by prefixing spaces onto the strings: a hand-indented cell
+    loses its indent the moment Rich wraps it, which is how a "requires numpy>=2" note
+    ended up starting at column 0 on its second line.
+    """
+    console.print(Padding(table, (0, 0, 0, indent)))
+
+
+def hint(text, indent=4):
+    """A muted continuation line under a row or table — no marker, indent preserved on wrap."""
+    console.print(Padding(Text(text, style="muted"), (0, 0, 0, indent)))
+
+
+def fmt_version(version, keep_local=False):
+    """A version trimmed for a status row.
+
+    PEP 440 puts build metadata after a "+": `0.1.dev14190+g24516a94b.empty` is 29
+    characters of which the last 17 are a git hash and a build-target tag. That is
+    provenance, not the answer to "which version is installed", and at COLUMNS=40 it
+    crowded the verdict glyph off the row. `doctor --verbose` and `info` still show the
+    full string; pass keep_local=True where provenance is the point.
+    """
+    if not version:
+        return "not found"
+    if keep_local or "+" not in version:
+        return version
+    return version.split("+", 1)[0]

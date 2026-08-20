@@ -1587,9 +1587,9 @@ def _report_bundle_requirements(repo_id: str, arch: Optional[str]) -> bool:
     if not (manifest.platform or manifest.runtime):
         typer.secho(f"  · authored against tt-metal {manifest.tt_metal_version} "
                     "(v3 bundle — no version ranges declared)", fg=typer.colors.CYAN)
-    return not unmet
-
-    # Which installed tt-metal instance would serve this model.
+    # Which installed tt-metal instance would serve this model. This block sat *after* the
+    # `return` below and so had never run: `doctor <id>` has never printed the
+    # instance-selection line it was written to print.
     if manifest.platform or manifest.runtime:
         ttnn, vllm, plugin = _manifest_ranges(manifest)
         result = instances.select(ttnn=ttnn, vllm=vllm, plugin=plugin)
@@ -1598,6 +1598,8 @@ def _report_bundle_requirements(repo_id: str, arch: Optional[str]) -> bool:
         else:
             typer.secho(f"  → no instance selectable: {result.reason} "
                         "(register one with `tt-model instances add`)", fg=typer.colors.YELLOW)
+
+    return not unmet
 
 
 @app.command()
@@ -1617,22 +1619,57 @@ def doctor(
     Exits non-zero if any component is missing or below the required version.
     """
     report = toolchain.check_toolchain()
-    typer.secho("Toolchain:", bold=True)
+    console.console.print("[bold accent]Toolchain[/bold accent]")
+    # Aligned columns. This used to stack three em-dashes into one line —
+    # "✗ tt-metal: — (require >= 0.72.0) — not found — install tt-metal >= 0.72.0" —
+    # where the bare "—" was the *version* and the reader had to parse punctuation to
+    # find the verdict.
+    table = console.check_table()
     for c in report.components:
-        ok = c.adequate
-        mark = "✓" if ok else "✗"
-        color = typer.colors.GREEN if ok else typer.colors.RED
-        ver = c.version or "—"
-        typer.secho(f"  {mark} {c.name}: {ver} (require >= {c.required}) — {c.message}", fg=color)
+        mark = "[success]✓[/success]" if c.adequate else "[error]✗[/error]"
+        # Keep the full version under --verbose: the git hash is what you need when you
+        # are actually chasing a version skew.
+        table.add_row(mark, c.name,
+                      console.fmt_version(c.version, keep_local=console.is_verbose()),
+                      f"require >= {c.required}")
+    console.print_table(table)
+    for c in report.components:
+        if not c.adequate:
+            # The row already shows "not found"; keep only the actionable half of the
+            # message so the hint says what to do rather than restating the verdict.
+            msg = c.message
+            for prefix in ("not found — ", "not found - ", "not found: "):
+                if msg.startswith(prefix):
+                    msg = msg[len(prefix):]
+                    break
+            console.note(msg, marker="!", style="warning")
 
     dev = metal.detect_device()
-    typer.secho("\nHardware:", bold=True)
+    console.console.print("\n[bold accent]Hardware[/bold accent]")
     if dev.arch:
-        typer.secho(f"  ✓ arch={dev.arch} devices={dev.device_count} (via {dev.source})",
-                    fg=typer.colors.GREEN)
+        hw = console.check_table()
+        hw.add_row("[success]✓[/success]", dev.arch, f"{dev.device_count} device(s)",
+                   f"via {dev.source}")
+        console.print_table(hw)
     else:
-        typer.secho("  ! no Tenstorrent device detected (tt-smi/ARCH_NAME unavailable)",
-                    fg=typer.colors.YELLOW)
+        console.note("no Tenstorrent device detected (tt-smi/ARCH_NAME unavailable)",
+                     marker="!", style="warning")
+
+    # Environment coherence. Every individual version check can pass on an environment pip
+    # already considers broken: ttnn pins numpy<2 while the vLLM fork's opencv wants
+    # numpy>=2, so installing both satisfied each check and still printed "adequate" one
+    # line after pip printed a hard ERROR. Advisory, not blocking — the conflicting package
+    # may be an extra the TT path never imports, and we cannot know that from here.
+    conflicts = toolchain.check_environment()
+    if conflicts:
+        console.console.print("\n[bold accent]Environment[/bold accent]")
+        env = console.check_table()
+        for c in conflicts:
+            env.add_row("[warning]![/warning]", c.package, c.installed or "not installed",
+                        f"requires {c.requirement}")
+        console.print_table(env)
+        console.hint("harmless if the TT serving path never imports these — but if serving "
+                     "fails on an import, start here")
 
     reqs_ok = True
     if repo_id:
@@ -1640,7 +1677,14 @@ def doctor(
 
     if not report.ok or not reqs_ok:
         raise typer.Exit(code=1)
-    typer.secho("\n✓ toolchain adequate", fg=typer.colors.GREEN)
+    if conflicts:
+        # Don't claim "adequate" over a named conflict; don't fail on an advisory either.
+        console.console.print(
+            f"\n[success]✓ toolchain adequate[/success]"
+            f"[muted] — with {len(conflicts)} environment conflict(s) above[/muted]"
+        )
+        return
+    console.console.print("\n[success]✓ toolchain adequate[/success]")
 
 
 # ----------------------------------------------------------------------------- run
