@@ -137,7 +137,8 @@ def _compose_launch_command(manifest: "Manifest", weights: Optional[str]) -> Lis
     """Compose the vLLM launch argv from a v4 manifest's structured resources/capabilities.
 
     Mirrors the ``server_example_tt.py --model ... --max_num_seqs N`` convention (underscore
-    flags) used throughout this repo. This is the ONLY place the opaque argv is synthesized;
+    flags) used throughout this repo, except where vLLM only accepts a dash-cased spelling
+    (``--tool-call-parser``). This is the ONLY place the opaque argv is synthesized;
     anything this mapping doesn't cover is handled by the escape hatches:
     ``resources.extra_args`` (appended) and ``resources.command_override`` (full replacement,
     per machine key) — so an author is never blocked waiting for a new field per vLLM flag.
@@ -158,7 +159,8 @@ def _compose_launch_command(manifest: "Manifest", weights: Optional[str]) -> Lis
     cap = manifest.capabilities
     if cap is not None:
         if cap.tool_parser:
-            cmd += ["--tool_parser", cap.tool_parser]
+            # vLLM requires --enable-auto-tool-choice to accompany --tool-call-parser
+            cmd += ["--enable-auto-tool-choice", "--tool-call-parser", cap.tool_parser]
         if cap.reasoning_parser:
             cmd += ["--reasoning_parser", cap.reasoning_parser]
     if res is not None and res.extra_args:
