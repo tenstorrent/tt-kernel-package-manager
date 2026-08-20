@@ -229,7 +229,14 @@ export TT_VLLM_BUILTIN_MODELS=0
 export PYTHONPATH="$HERE/{METAL_DIR}:${{PYTHONPATH:-}}"   # resolves the adapter's models.* imports
 export MESH_DEVICE="${{MESH_DEVICE:-{mesh_device}}}"
 export TT_METAL_VISIBLE_DEVICES="${{TT_METAL_VISIBLE_DEVICES:-0}}"
-{hf_export}{extra_env}exec "$PYBIN" -m vllm.entrypoints.openai.api_server --model "{weights}" {serving} "$@"
+{hf_export}{extra_env}CMD=("$PYBIN" -m vllm.entrypoints.openai.api_server --model "{weights}" {serving} "$@")
+# TT_MODEL_PRINT=1 (set by `tt-model serve --print`) echoes the fully-resolved command+env
+if [ "${{TT_MODEL_PRINT:-0}}" = "1" ]; then
+  printf 'LD_PRELOAD=%s TT_METAL_HOME=%s EXTRA_MODELS_DIR=%s MESH_DEVICE=%s HF_MODEL=%s\n  %s\n' \\
+    "$LD_PRELOAD" "$TT_METAL_HOME" "$EXTRA_MODELS_DIR" "$MESH_DEVICE" "${{HF_MODEL:-}}" "${{CMD[*]}}"
+  exit 0
+fi
+exec "${{CMD[@]}}"
 """
 
 

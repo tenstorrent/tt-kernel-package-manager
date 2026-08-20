@@ -1202,6 +1202,11 @@ def _install_self_contained(
                        "--force to attempt anyway (likely to fail at pip install).")
 
     dest = runtime.resolve_models_dir(models_dir, repo_id)
+    if dest.exists() and (dest / "venv").exists() and not force:
+        typer.secho(
+            f"✓ already installed at {dest} — reusing it (your local edits to run.sh etc. are "
+            f"kept). Re-run with --force to re-pull and overwrite.", fg=typer.colors.GREEN)
+        return
     if dest.exists():
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1252,7 +1257,9 @@ def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional
     argv = ["bash", str(run_script), *(extra_args or [])]
     typer.secho(f"[vLLM self-contained: {entry.get('repo_id')} via {run_script}]", fg=typer.colors.CYAN)
     if print_only:
-        typer.echo(" ".join(argv))
+        # run.sh resolves the interpreter/LD_PRELOAD/paths at runtime; ask it to echo the fully
+        # resolved command + env instead of the bare `bash run.sh` line.
+        subprocess.run(argv, env={**os.environ, "TT_MODEL_PRINT": "1"})
         return
     try:
         raise typer.Exit(code=subprocess.run(argv).returncode)
@@ -1726,8 +1733,9 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
         raise typer.Exit(code=130)
 
 
-@app.command()
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def serve(
+    ctx: typer.Context,
     repo_id: str = typer.Argument(..., help="vLLM bundle id (namespace/name[@rev]) to serve."),
     print_only: bool = typer.Option(False, "--print", help="Print the launch command instead of running it."),
     local_only: bool = typer.Option(False, "--local-only", help="Do not pull; require an installed bundle."),
@@ -1747,13 +1755,14 @@ def serve(
     the OpenAI-compatible server with the bundle's per-machine launch command. Repeat
     invocations skip the pull and go straight to launch.
     """
-    _warn_toolchain()
     repo_id, revision = _split_revision(repo_id)
+    extra_args = list(ctx.args)  # anything after the bundle id is passed through to vLLM
 
-    # Self-contained (v5) fast path: an already-installed bundle serves from its own venv.
+    # Self-contained (v5) fast path: an already-installed bundle serves from its own venv. The host
+    # toolchain (ttnn/vLLM versions) is irrelevant here — the bundle ships its own — so don't warn.
     entry = localdb.get(repo_id)
     if entry and entry.get("self_contained"):
-        _serve_self_contained(entry, print_only=print_only)
+        _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
         return
     # Not installed yet: if the remote bundle is self-contained, install then serve it (unless
     # --local-only). A self-contained bundle never routes through the host-provisioned vLLM path.
@@ -1770,9 +1779,10 @@ def serve(
                                         models_dir=None, with_weights=False)
             entry = localdb.get(repo_id)
             if entry and entry.get("self_contained"):
-                _serve_self_contained(entry, print_only=print_only)
+                _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
                 return
 
+    _warn_toolchain()  # host-provisioned path: the surrounding tt-metal/vLLM versions do matter here
     _serve_vllm(repo_id, revision, print_only=print_only, local_only=local_only,
                 arch=arch, bundles_dir=bundles_dir, do_health=health_check,
                 force=force, instance=instance)

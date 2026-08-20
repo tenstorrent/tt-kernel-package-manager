@@ -106,6 +106,20 @@ def test_serve_self_contained_print(monkeypatch, tmp_path):
         "install_dir": str(inst), "run_script": str(run_sh), "python": str(inst / "venv/bin/python"),
     })
 
+    calls = {}
+
+    def _fake_run(argv, **kw):
+        calls["argv"] = argv
+        calls["env"] = kw.get("env", {})
+
+        class _R:
+            returncode = 0
+
+        return _R()
+
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
     res = _runner.invoke(cli.app, ["serve", "myorg/llama-3.2-3b-tt", "--print"])
     assert res.exit_code == 0, res.output
-    assert "bash" in res.output and str(run_sh) in res.output
+    # --print asks run.sh to echo the resolved command via TT_MODEL_PRINT=1
+    assert calls["argv"][0] == "bash" and str(run_sh) in calls["argv"]
+    assert calls["env"].get("TT_MODEL_PRINT") == "1"
