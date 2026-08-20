@@ -18,6 +18,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+
+from . import compat
 from typing import List, Optional
 
 from .manifest import WeightsRef
@@ -43,12 +45,12 @@ def resolve_models_dir(models_dir: Optional[str], repo_id: str) -> Path:
     ``<base>/<org>/<name>`` (no slash-flattening) so the path round-trips cleanly for
     ``rm``/serve and never collides.
     """
-    explicit = models_dir if models_dir is not None else os.environ.get(ENV_MODELS_DIR)
+    explicit = models_dir if models_dir is not None else compat.env(ENV_MODELS_DIR)
     if explicit:
         base = Path(explicit).expanduser()
     else:
         home = os.environ.get("HOME")
-        base = (Path(home) / ".cache" if home else Path("/tmp")) / "tt-model" / "models"
+        base = compat.data_dir(Path(home) / ".cache" if home else Path("/tmp")) / "models"
     # repo_id is "org/name" (or just "name"); keep its structure under base.
     return base.joinpath(*repo_id.split("/"))
 

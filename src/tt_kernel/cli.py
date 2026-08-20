@@ -20,7 +20,7 @@ import typer
 
 from . import MANIFEST_NAME, TT_MODEL_CATALOG_TAG, TT_MODEL_TAG, __version__
 from . import (
-    auth, bundles, cache, device, hub, instances, localdb, metal, packaging,
+    auth, bundles, cache, compat, device, hub, instances, localdb, metal, packaging,
     resolve as resolve_mod, runtime, toolchain,
 )
 from .manifest import (
@@ -1934,5 +1934,17 @@ def version() -> None:
     typer.echo(__version__)
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Console-script entry point. Both ``tt-model`` and the legacy ``tt-kernel`` name map here;
+    invoking via the old name still works but prints a one-line deprecation note to stderr."""
+    if compat.invoked_as_legacy():
+        typer.secho(
+            "note: `tt-kernel` has been renamed to `tt-model`; the old command still works "
+            "but is deprecated — please switch to `tt-model`.",
+            fg=typer.colors.YELLOW, err=True,
+        )
     app()
+
+
+if __name__ == "__main__":
+    main()

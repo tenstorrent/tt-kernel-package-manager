@@ -12,12 +12,14 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+
+from . import compat
 from typing import Dict, List, Optional
 
 
 def _index_path() -> Path:
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
-    return Path(base) / "tt-model" / "installed.json"
+    return compat.data_dir(Path(base)) / "installed.json"
 
 
 def _load() -> Dict[str, dict]:

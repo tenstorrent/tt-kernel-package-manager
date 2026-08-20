@@ -27,6 +27,8 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+
+from . import compat
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from . import device
@@ -47,11 +49,11 @@ def resolve_bundles_dir(bundles_dir: Optional[str] = None) -> Path:
     Resolution (flag > env > default, mirroring ``runtime.resolve_models_dir``):
     ``--bundles-dir`` > ``TT_MODEL_BUNDLES_DIR`` > ``~/.cache/tt-model/bundles``.
     """
-    explicit = bundles_dir if bundles_dir is not None else os.environ.get(ENV_BUNDLES_DIR)
+    explicit = bundles_dir if bundles_dir is not None else compat.env(ENV_BUNDLES_DIR)
     if explicit:
         return Path(explicit).expanduser()
     home = os.environ.get("HOME")
-    return (Path(home) / ".cache" if home else Path("/tmp")) / "tt-model" / "bundles"
+    return compat.data_dir(Path(home) / ".cache" if home else Path("/tmp")) / "bundles"
 
 
 def model_key(repo_id: str) -> str:
@@ -241,7 +243,7 @@ def machine_candidates(arch_override: Optional[str] = None) -> List[str]:
     from most to least specific and fall back to ``default``.
     """
     cands: List[str] = []
-    override = os.environ.get(ENV_MACHINE)
+    override = compat.env(ENV_MACHINE)
     if override:
         cands.append(override)
     info = device.detect(arch_override=arch_override)

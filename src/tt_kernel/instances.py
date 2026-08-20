@@ -36,6 +36,8 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from . import compat
 from typing import Dict, List, Optional, Tuple
 
 from . import metal
@@ -123,7 +125,7 @@ def _registry_path() -> Path:
     index and caches live under ``~/.cache``). Config, not cache: it records user/tt-cli intent.
     """
     base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
-    return Path(base) / "tt-model" / "instances.json"
+    return compat.data_dir(Path(base)) / "instances.json"
 
 
 def _load() -> dict:
