@@ -169,10 +169,42 @@ def _servability(bundle_path: str) -> Tuple[bool, Optional[str]]:
         md = bundles.read_vllm_metadata(Path(bundle_path))
     except Exception:  # noqa: BLE001 — unreadable metadata is a different problem
         return True, None
-    root = runtime.adapter_root(getattr(md, "main_class", "") or "")
-    if root and not runtime.module_importable(root):
-        return False, f"{root} is not importable"
+    # The bundle folder itself counts: the TT plugin resolves adapters relative to each
+    # EXTRA_MODELS_DIR entry, and some bundles ship their own models/ subtree.
+    missing = runtime.missing_adapter_segment(getattr(md, "main_class", "") or "",
+                                              search_paths=[str(bundle_path)])
+    if missing:
+        return False, f"{missing} is not importable"
     return True, None
+
+
+def unregistered_bundles() -> List[Tuple[str, str]]:
+    """``(repo_id, path)`` for bundle folders present on disk but absent from the index.
+
+    A folder can be materialised without an index entry — pulled under a different
+    XDG_CACHE_HOME, restored from a backup, or copied in by hand. It is servable in every
+    practical sense (the plugin only needs it inside EXTRA_MODELS_DIR), so leaving it out of
+    the menu hides a working model from its owner. Derived from the folder name, which
+    `bundles.install_bundle` writes as ``namespace__name``.
+    """
+    from . import bundles as bundles_mod
+
+    known = {e.get("repo_id") for e in localdb.all_entries()}
+    out: List[Tuple[str, str]] = []
+    try:
+        root = bundles_mod.resolve_bundles_dir(None)
+    except Exception:  # noqa: BLE001
+        return out
+    if not root.is_dir():
+        return out
+    for child in sorted(root.iterdir()):
+        if not child.is_dir() or not (child / bundles_mod.VLLM_METADATA_NAME).is_file():
+            continue
+        repo_id = child.name.replace("__", "/", 1)
+        if repo_id in known:
+            continue
+        out.append((repo_id, str(child)))
+    return out
 
 
 def installed_choices(*, check_servable: bool = True) -> List[Choice]:
@@ -198,6 +230,14 @@ def installed_choices(*, check_servable: bool = True) -> List[Choice]:
             bits.append(blocked)
         suffix = f"  ({' · '.join(bits)})" if bits else ""
         out.append(Choice(repo_id=repo_id, label=f"{repo_id}{suffix}",
+                          servable=servable, blocked_by=blocked))
+
+    for repo_id, path in unregistered_bundles():
+        servable, blocked = (True, None)
+        if check_servable:
+            servable, blocked = _servability(path)
+        bits = ["on disk, not indexed"] + ([blocked] if blocked else [])
+        out.append(Choice(repo_id=repo_id, label=f"{repo_id}  ({' · '.join(bits)})",
                           servable=servable, blocked_by=blocked))
     # Servable first, so a menu default is never a bundle we know cannot run.
     return sorted(out, key=lambda c: (not c.servable, c.repo_id))

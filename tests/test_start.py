@@ -23,6 +23,21 @@ runner = CliRunner()
 CLI = [sys.executable, "-m", "tt_kernel.cli"]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_bundles_dir(tmp_path, monkeypatch):
+    """Point the on-disk bundle scan at an empty dir.
+
+    `installed_choices` reads the real bundles directory to surface folders that have no
+    index entry. Without this, whatever is installed on the developer's machine leaks into
+    every test's expected choices. Tests that exercise the scan override it themselves.
+    """
+    import tt_kernel.bundles as _bundles
+
+    empty = tmp_path / "bundles-empty"
+    empty.mkdir()
+    monkeypatch.setattr(_bundles, "resolve_bundles_dir", lambda *_a, **_k: empty)
+
+
 # ── prompting policy ─────────────────────────────────────────────────────────
 class TestPromptPolicy:
     def test_explicit_token_never_prompts(self, monkeypatch):
@@ -241,11 +256,23 @@ class TestPickModel:
         assert "tt-model search --catalog" in res.output
         assert "Missing argument" not in res.output
 
-    def test_a_single_installed_bundle_is_used_without_asking(self, monkeypatch):
+    def test_a_single_bundle_is_still_offered_as_a_list_interactively(self, monkeypatch):
+        """Silently taking "the only installed bundle" saves one keystroke and costs the
+        user their sense of what is about to run — it reads as the CLI having a favourite
+        model. With a TTY, always show the list."""
+        self._entries(monkeypatch, [
+            {"repo_id": "org/only", "bundle_path": "/tmp/x", "backend": "vllm"}])
+        monkeypatch.setattr(cli.console, "choose", lambda *a, **k: 0)
+        repo, note = cli._pick_model(interactive=True)
+        assert repo == "org/only"
+
+    def test_a_single_bundle_is_taken_without_asking_when_we_cannot_ask(self, monkeypatch):
+        """--yes or a piped stdin cannot answer a menu, and one runnable candidate is
+        unambiguous rather than a guess."""
         self._entries(monkeypatch, [
             {"repo_id": "org/only", "bundle_path": "/tmp/x", "backend": "vllm"}])
         monkeypatch.setattr(cli.console, "choose", _must_not_be_called)
-        repo, note = cli._pick_model(interactive=True)
+        repo, note = cli._pick_model(interactive=False)
         assert repo == "org/only"
         assert "only installed" in note
 
@@ -340,7 +367,7 @@ class TestServabilityGate:
         assert "despite" in note, note
         assert any("✗" in l for l in seen["labels"]), "the menu did not mark it unrunnable"
 
-    def test_a_single_servable_bundle_is_still_auto_picked(self, monkeypatch):
+    def test_a_single_servable_bundle_is_taken_when_we_cannot_ask(self, monkeypatch):
         self._entries(monkeypatch, [{"repo_id": "org/ok", "bundle_path": "/ok"}])
         self._servability(monkeypatch, {})
         repo, note = cli._pick_model(interactive=False)
@@ -387,3 +414,60 @@ class TestServabilityGate:
         self._entries(monkeypatch, [{"repo_id": "org/a", "bundle_path": "/a"}])
         monkeypatch.setattr(start, "_servability", _must_not_be_called)
         assert start.installed_choices(check_servable=False)[0].servable is True
+
+
+# ── bundles on disk but not indexed ──────────────────────────────────────────
+class TestUnregisteredBundles:
+    def _bundle(self, root, name, main_class, with_models=False):
+        d = root / name
+        d.mkdir(parents=True)
+        (d / "vllm_metadata.json").write_text(
+            '{"arch": "X", "main_class": "%s"}' % main_class)
+        if with_models:
+            pkg = d / "models" / "mymodel"
+            pkg.mkdir(parents=True)
+            (d / "models" / "__init__.py").write_text("")
+            (pkg / "__init__.py").write_text("")
+            (pkg / "generator_vllm.py").write_text("class Cls: pass\n")
+        return d
+
+    def test_a_folder_with_no_index_entry_is_still_offered(self, monkeypatch, tmp_path):
+        """A bundle can be materialised without an index entry — pulled under a different
+        XDG_CACHE_HOME, restored, or copied in. It is servable in every practical sense, so
+        leaving it out of the menu hides a working model from its owner."""
+        self._bundle(tmp_path, "org__ghost", "models.mymodel.generator_vllm:Cls")
+        monkeypatch.setattr(start.localdb, "all_entries", lambda: [])
+        import tt_kernel.bundles as b
+        monkeypatch.setattr(b, "resolve_bundles_dir", lambda *_a, **_k: tmp_path)
+        found = start.unregistered_bundles()
+        assert found and found[0][0] == "org/ghost"
+
+    def test_indexed_bundles_are_not_duplicated(self, monkeypatch, tmp_path):
+        self._bundle(tmp_path, "org__known", "models.x:Cls")
+        monkeypatch.setattr(start.localdb, "all_entries",
+                            lambda: [{"repo_id": "org/known", "bundle_path": "/x"}])
+        import tt_kernel.bundles as b
+        monkeypatch.setattr(b, "resolve_bundles_dir", lambda *_a, **_k: tmp_path)
+        assert start.unregistered_bundles() == []
+
+    def test_a_directory_without_metadata_is_not_a_bundle(self, monkeypatch, tmp_path):
+        (tmp_path / "org__junk").mkdir(parents=True)
+        monkeypatch.setattr(start.localdb, "all_entries", lambda: [])
+        import tt_kernel.bundles as b
+        monkeypatch.setattr(b, "resolve_bundles_dir", lambda *_a, **_k: tmp_path)
+        assert start.unregistered_bundles() == []
+
+    def test_a_bundle_shipping_its_own_adapter_counts_as_servable(self, tmp_path):
+        """The TT plugin resolves adapters relative to each EXTRA_MODELS_DIR entry, so a
+        bundle carrying its own models/ subtree is servable — checking the bare interpreter
+        would have called it broken."""
+        d = self._bundle(tmp_path, "org__selfsufficient",
+                         "models.mymodel.generator_vllm:Cls", with_models=True)
+        servable, reason = start._servability(str(d))
+        assert servable is True, reason
+
+    def test_a_bundle_shipping_nothing_is_not_servable(self, tmp_path):
+        d = self._bundle(tmp_path, "org__empty", "models.nope.generator_vllm:Cls")
+        servable, reason = start._servability(str(d))
+        assert servable is False
+        assert "models" in reason

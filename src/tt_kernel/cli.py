@@ -400,14 +400,9 @@ def _pick_model(*, interactive: bool) -> "tuple[str, str]":
 
     servable = [c for c in choices if c.servable]
 
-    # Exactly one runnable candidate: nothing to choose between, so don't ask. The
-    # provenance is returned rather than printed — this runs before the roadmap, and a note
-    # above the panel reads like output from a previous command.
-    if len(servable) == 1:
-        note = ("the only installed bundle" if len(choices) == 1
-                else "the only installed bundle that can serve here")
-        return servable[0].repo_id, note
-
+    # Interactively we always show the list, even for a single bundle. Silently choosing
+    # "the only installed bundle" saves one keystroke and costs the user their sense of what
+    # is about to run — and reads as the CLI having a favourite model.
     if not interactive:
         if not servable:
             lines = ["[error]Nothing installed here can serve.[/error]", ""]
@@ -423,6 +418,12 @@ def _pick_model(*, interactive: bool) -> "tuple[str, str]":
                       f"  tt-model start {choices[0].repo_id}",
                       "[muted]    run it anyway — it stops at the same check, with detail[/muted]"]
             raise _fail_panel("No model to start", lines, code=2)
+        if len(servable) == 1:
+            # No prompt is possible and there is exactly one runnable candidate, so
+            # proceeding is unambiguous rather than a guess.
+            note = ("the only installed bundle" if len(choices) == 1
+                    else "the only installed bundle that can serve here")
+            return servable[0].repo_id, note
         raise _fail_panel("No model to start", [
             "[error]No model was named, and several can serve.[/error]",
             "",
@@ -2279,7 +2280,8 @@ def _serve_activation(entry: dict, *, instance_override: Optional[str]):
 
 
 def _serve_preflight(endpoint: str, inst_python: Optional[str],
-                     main_class: Optional[str] = None) -> None:
+                     main_class: Optional[str] = None,
+                     adapter_paths: Optional[List[str]] = None) -> None:
     """Everything knowable before vLLM is launched, checked before anything is promised.
 
     Two conditions, both of which previously surfaced only after the CLI had already
@@ -2300,20 +2302,31 @@ def _serve_preflight(endpoint: str, inst_python: Optional[str],
         }, consequence="vLLM was not started.")
 
     # 2. Is the model's serving adapter actually present? The bundle names a class like
-    # models.autoports.<model>.tt.generator_vllm:Cls, and the ttnn PyPI wheel ships no
-    # models/ tree at all — so a perfectly healthy-looking toolchain still cannot serve.
-    # Without this the failure arrives as an ImportError from inside vLLM after startup.
-    root = runtime.adapter_root(main_class or "")
-    if root and not runtime.module_importable(root, inst_python):
-        where = inst_python or "this environment"
+    # models.autoports.<model>.tt.generator_vllm:Cls. Report the first dotted segment that
+    # does not resolve, because "no models tree at all" and "the tree is here but this
+    # adapter is not" have different fixes. Without this the failure arrives as an
+    # ImportError from inside vLLM after startup.
+    missing = runtime.missing_adapter_segment(main_class, inst_python,
+                                              search_paths=adapter_paths)
+    if missing:
+        module = runtime.adapter_module(main_class) or ""
+        where = _short_path(inst_python or "this environment")
+        if missing == module.split(".", 1)[0]:
+            detail = (f"{missing!r} is not importable in {where}. The ttnn PyPI wheel ships "
+                      "no models/ tree, so a green toolchain is not enough here.")
+            actions = [f"{'export PYTHONPATH=<tt-metal-checkout>':<44}# the tree lives there",
+                       f"{'tt-model info <id>':<44}# what this bundle needs"]
+        else:
+            parent = missing.rsplit(".", 1)[0]
+            detail = (f"{parent!r} resolves in {where}, but {missing!r} does not — the "
+                      "models tree is present and this particular adapter is not part of it.")
+            actions = [f"{'tt-model list':<44}# bundles that ship their own adapter",
+                       f"{'check out the branch that adds ' + missing:<44}"]
         raise _fail_card("Preflight", {
-            "cause": f"the model's adapter is not installed ({root} is missing)",
-            "detail": f"This bundle serves through {main_class}, but {root!r} is not "
-                      f"importable in {_short_path(where)}. The ttnn PyPI wheel does not "
-                      "ship the models/ tree, so a green toolchain is not enough here.",
-            "evidence": "",
-            "actions": [f"{'tt-model info <id>':<34}# what this bundle needs",
-                        f"{'add the tt-metal models/ tree to PYTHONPATH':<34}"],
+            "cause": f"the serving adapter is missing ({missing})",
+            "detail": detail,
+            "evidence": f"main_class = {module}" if module else "",
+            "actions": actions,
         }, consequence="vLLM was not started.")
 
     # 3. Is the port we are about to claim actually free? One syscall, versus 18 seconds of
@@ -2380,7 +2393,8 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
     # above the vLLM-importable check, so `serve` promised "OpenAI endpoint (once up):
     # http://localhost:8000" and then said it could not serve at all.
     if not print_only:
-        _serve_preflight(endpoint, inst_python, main_class=md.main_class)
+        _serve_preflight(endpoint, inst_python, main_class=md.main_class,
+                         adapter_paths=[str(bundle_path), str(extra_models_dir)])
 
     via = f"{mkey}" + (f"; instance={inst_label}" if inst_label else "")
     typer.secho(f"[vLLM: {md.arch} via {via}; EXTRA_MODELS_DIR={extra_models_dir}]",

@@ -319,8 +319,9 @@ def test_serve_blocks_when_the_adapter_tree_is_absent(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "vllm_available", lambda python=None: True)
     res = runner.invoke(cli.app, ["serve", "org/m", "--local-only"])
     assert res.exit_code == 1
-    assert "adapter is not installed" in res.output
-    assert "models is missing" in res.output
+    assert "serving adapter is missing" in res.output
+    assert "models" in res.output
+    assert "no models/ tree" in res.output
 
 
 def test_serve_does_not_block_when_the_adapter_is_present(monkeypatch, tmp_path):
@@ -334,4 +335,4 @@ def test_serve_does_not_block_when_the_adapter_is_present(monkeypatch, tmp_path)
     _seed_vllm_installed("org/ok", dest)
     monkeypatch.setattr(runtime, "vllm_available", lambda python=None: True)
     res = runner.invoke(cli.app, ["serve", "org/ok", "--local-only", "--print"])
-    assert "adapter is not installed" not in res.output
+    assert "serving adapter is missing" not in res.output

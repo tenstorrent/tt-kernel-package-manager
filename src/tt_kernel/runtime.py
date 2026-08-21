@@ -349,17 +349,26 @@ def port_of(endpoint: str) -> Optional[int]:
         return None
 
 
-def module_importable(module: str, python: Optional[str] = None) -> bool:
+def module_importable(module: str, python: Optional[str] = None,
+                      search_paths: Optional[List[str]] = None) -> bool:
     """Whether ``module`` can be found by the interpreter that will run the server.
 
     ``find_spec``, not ``import``: the target modules pull in the whole device stack, and
     the question here is only whether the code is present.
+
+    ``search_paths`` must include anything the runtime will add to ``sys.path`` — for us,
+    the bundle folder. A bundle may ship its own ``models/`` subtree (the TT plugin resolves
+    adapters relative to each ``EXTRA_MODELS_DIR`` entry), so checking the bare interpreter
+    would call a perfectly servable bundle broken.
     """
     import subprocess as sp
     import sys as _sys
 
+    prelude = "".join(f"sys.path.insert(0, {p!r})\n" for p in (search_paths or []))
     code = (
-        "import importlib.util as u, sys\n"
+        "import sys\n"
+        + prelude
+        + "import importlib.util as u\n"
         f"sys.exit(0 if u.find_spec({module!r}) else 1)\n"
     )
     try:
@@ -369,16 +378,41 @@ def module_importable(module: str, python: Optional[str] = None) -> bool:
         return True  # cannot tell; do not invent a blocker
 
 
-def adapter_root(main_class: str) -> Optional[str]:
-    """The importable module root of a bundle's ``main_class``.
+def adapter_module(main_class: Optional[str]) -> Optional[str]:
+    """The full module path of a bundle's ``main_class``.
 
     `vllm_metadata.json` names the serving adapter as
-    ``models.autoports.qwen_qwen3_32b.tt.generator_vllm:Qwen3ForCausalLM``. The top-level
-    package is what determines whether the adapter tree exists at all — a missing
-    ``models`` is a different (and much more common) problem than a missing leaf module,
-    and it is the one the ttnn PyPI wheel causes, since that wheel ships no models/ tree.
+    ``models.autoports.qwen_qwen3_32b.tt.generator_vllm:Qwen3ForCausalLM``.
     """
     if not main_class:
         return None
-    module = main_class.split(":", 1)[0].strip()
+    return (main_class.split(":", 1)[0].strip() or None)
+
+
+def adapter_root(main_class: Optional[str]) -> Optional[str]:
+    """The top-level package of a bundle's ``main_class``."""
+    module = adapter_module(main_class)
     return module.split(".", 1)[0] if module else None
+
+
+def missing_adapter_segment(main_class: Optional[str], python: Optional[str] = None,
+                            search_paths: Optional[List[str]] = None) -> Optional[str]:
+    """The first dotted segment of the adapter that will not import, or None if it all does.
+
+    Checking only the top-level package was too coarse and produced a wrong answer on a real
+    box: putting a tt-metal checkout on PYTHONPATH makes ``models`` importable, so a
+    root-only check goes green — while ``models.autoports`` still does not exist there and
+    vLLM still dies on the import. Reporting the deepest prefix that *does* resolve is also
+    what makes the message actionable: "models resolves but models.autoports does not" says
+    the tree is present and this adapter is not, which is a different fix from "no models
+    tree at all".
+    """
+    module = adapter_module(main_class)
+    if not module:
+        return None
+    parts = module.split(".")
+    for i in range(1, len(parts) + 1):
+        prefix = ".".join(parts[:i])
+        if not module_importable(prefix, python, search_paths):
+            return prefix
+    return None
