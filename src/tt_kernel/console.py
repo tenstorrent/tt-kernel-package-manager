@@ -24,8 +24,11 @@ Adapt freely; the shapes matter more than the code. See SKILL.md for the rules
 this implements and reference/patterns.md for the failure-handling patterns.
 """
 
+import atexit
 import contextlib
 import io
+import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -255,9 +258,21 @@ def register_phases(titles):
     _phases = [{"title": t, "status": "pending"} for t in titles]
 
 
+_PHASE_MARKERS = {
+    "done": "[success]✓[/success]",
+    "failed": "[error]✗[/error]",
+    "skipped": "[muted]⊘[/muted]",
+}
+
+
 def stepper_line():
-    """`✓ Checks ── ◉ Build ── ○ Launch` — done / current / pending, where colour
-    carries the progress (green fills in left to right)."""
+    """`✓ Checks ── ⊘ Configure ── ◉ Build ── ○ Launch` — done / skipped / current /
+    pending, where colour carries the progress (green fills in left to right).
+
+    A skipped phase is `⊘`, deliberately NOT the pending `○`: the two mean opposite
+    things (decided against vs. not reached yet) and a run that renders them alike
+    reads as if it stalled.
+    """
     parts = []
     for i, p in enumerate(_phases):
         if p["status"] == "done":
@@ -266,6 +281,8 @@ def stepper_line():
             parts.append(f"[accent.bold]◉ {p['title']}[/accent.bold]")
         elif p["status"] == "failed":
             parts.append(f"[error]✗ {p['title']}[/error]")
+        elif p["status"] == "skipped":
+            parts.append(f"[muted]⊘ {p['title']}[/muted]")
         else:
             parts.append(f"[dim]○ {p['title']}[/dim]")
         if i < len(_phases) - 1:
@@ -273,6 +290,161 @@ def stepper_line():
     line = Text.from_markup("".join(parts))
     line.no_wrap, line.overflow = True, "crop"
     return line
+
+
+def rule_width():
+    """How wide every rule and panel is. Capped, not full-width: at 160 columns a
+    terminal-wide rule is a slab that outweighs the content under it, and the panels are
+    already pinned to PANEL_WIDTH — furniture that disagrees on width reads as clutter."""
+    return min(shutil.get_terminal_size((80, 24)).columns, PANEL_WIDTH)
+
+
+def rule_line():
+    return "[muted]" + "─" * rule_width() + "[/muted]"
+
+
+def header_rows():
+    """The pinned header, one markup string per terminal row.
+
+    Row 1 is the stepper; row 2 is a full-width rule marking the boundary between the fixed
+    header and the scrolling body — a rule that stopped short of the edge read as content
+    rather than as a frame.
+    """
+    with _real_console.capture() as cap:
+        _real_console.print(stepper_line(), end="", crop=True)
+    return [cap.get(), rule_line()]
+
+
+def pin_height():
+    """Rows the pinned header occupies: the stepper plus its rule."""
+    return 2
+
+
+class _PinnedStepper:
+    """Hold the stepper on row 1 while the phase bodies scroll underneath it.
+
+    DECSTBM (`ESC [ top;bottom r`) narrows the terminal's scroll region to the rows below
+    the header. Ordinary printing then cannot reach row 1, so the stepper never has to be
+    reprinted between phases — `repaint()` redraws it in place and the body keeps scrolling
+    past it.
+
+    The hard rule: the region MUST be released on every exit path. A process that dies
+    inside one leaves the user's shell scrolling in a box until they type `reset`. Hence
+    atexit, a SIGTERM handler, and an explicit `release()` before the terminal is handed to
+    a foreground child — which would otherwise print into our box under a stale header.
+
+    TTY only, and off under -v (a verbose transcript is meant to be piped into a file, and
+    a scroll region mangles that) or when TT_MODEL_NO_PIN is set.
+    """
+
+    def __init__(self):
+        self._on = False
+        self._prev_term = None
+
+    def active(self):
+        return self._on
+
+    def engage(self):
+        if self._on or not _isatty() or _VERBOSE or os.environ.get("TT_MODEL_NO_PIN"):
+            return
+        rows = shutil.get_terminal_size((80, 24)).lines
+        height = pin_height()
+        if rows < height + 4:           # too short to give up the header and still read
+            return
+        self._on = True
+        with _lock:
+            f = _real_console.file
+            # Start from a blank canvas, because DECSTBM homes the cursor: fencing the
+            # region and then jumping to its top row would land the cursor on whatever is
+            # already displayed there and overprint it line by line. Scrolling the screen
+            # up first is the non-destructive way to get that canvas — everything on it
+            # moves into scrollback rather than being erased.
+            f.write("\n" * rows)
+            f.write(f"\033[{height + 1};{rows - 1}r")
+            f.write(f"\033[{height + 1};1H")
+            f.flush()
+        atexit.register(self.release)
+        with contextlib.suppress(ValueError, OSError):   # no-op off the main thread
+            self._prev_term = signal.signal(signal.SIGTERM, self._on_term)
+        with contextlib.suppress(AttributeError, ValueError, OSError):
+            signal.signal(signal.SIGWINCH, self._on_resize)
+
+    def repaint(self):
+        """Redraw the header without disturbing the body's cursor."""
+        if not self._on:
+            return
+        with _lock:
+            f = _real_console.file
+            out = ["\0337"]                  # DECSC: the body's cursor is restored below
+            for i, row in enumerate(header_rows(), 1):
+                if "[" in row and not row.startswith("\033"):
+                    with _real_console.capture() as cap:
+                        _real_console.print(Text.from_markup(row), end="", crop=True)
+                    row = cap.get()
+                out.append(f"\033[{i};1H\033[2K" + row)
+            out.append("\0338")
+            f.write("".join(out))
+            f.flush()
+
+    def release(self):
+        """Give the whole screen back. Safe to call twice."""
+        if not self._on:
+            return
+        self._on = False
+        with _lock:
+            f = _real_console.file
+            # Resetting the region homes the cursor, exactly as setting it does. Without
+            # the DECSC/DECRC pair the shell's next prompt lands on row 1-2 — on top of the
+            # run's own output — instead of below it.
+            f.write("\0337\033[r\0338\n")
+            f.flush()
+        with contextlib.suppress(ValueError, OSError):
+            if self._prev_term is not None:
+                signal.signal(signal.SIGTERM, self._prev_term)
+
+    def _on_resize(self, *_):
+        """Re-fence after a resize: the old region is in the old geometry's rows."""
+        if not self._on:
+            return
+        rows = shutil.get_terminal_size((80, 24)).lines
+        height = pin_height()
+        if rows < height + 4:
+            self.release()
+            return
+        with _lock:
+            _real_console.file.write(f"\0337\033[{height + 1};{rows - 1}r\0338")
+            _real_console.file.flush()
+        self.repaint()
+
+    def _on_term(self, signum, frame):
+        self.release()
+        if callable(self._prev_term):
+            self._prev_term(signum, frame)
+        else:
+            raise SystemExit(128 + signum)
+
+
+pinned = _PinnedStepper()
+
+
+def pin_stepper():
+    """Opt in to the pinned header for this run (no-op when it cannot apply).
+
+    Call this BEFORE printing anything. It claims the screen, so output produced earlier
+    in the run would be scrolled away — and output produced *between* the first print and
+    this call gets overprinted by whatever lands in the region next.
+    """
+    pinned.engage()
+    pinned.repaint()
+
+
+def show_stepper():
+    """Put the stepper in front of the user: repainted in place when we own the header,
+    printed inline otherwise — so a piped log still records where the run had reached."""
+    if pinned.active():
+        pinned.repaint()
+    else:
+        console.print(stepper_line())
 
 
 @contextlib.contextmanager
@@ -294,9 +466,9 @@ def phase(title):
     index, total = _phases.index(entry) + 1, len(_phases)
     start = time.monotonic()
 
-    console.print(stepper_line())
+    show_stepper()
     console.print(Rule(f"[bold accent]{title}[/bold accent]", align="left",
-                       style="muted", characters="─"))
+                       style="muted", characters="─"), width=rule_width())
     _IN_PHASE = True
     try:
         yield entry
@@ -304,13 +476,57 @@ def phase(title):
         entry["status"] = "failed"
         raise
     else:
-        entry["status"] = "done"
+        # Only an untouched phase becomes "done" — a body that called mark_skipped()
+        # has already recorded the truth, and overwriting it would claim work that
+        # never happened.
+        if entry["status"] == "active":
+            entry["status"] = "done"
     finally:
         _IN_PHASE = False
-        marker = "[error]✗[/error]" if entry["status"] == "failed" else "[success]✓[/success]"
+        marker = _PHASE_MARKERS.get(entry["status"], "[success]✓[/success]")
+        # A skipped phase reports WHY, not how long: its duration measures the decision,
+        # not the work, and printing `0.0s` next to it invites the reader to trust it.
+        elapsed = time.monotonic() - start
+        if entry["status"] == "skipped":
+            tail = entry.get("why") or "skipped"
+        else:
+            # A phase that only rendered a result someone else computed clocks in at 0ms,
+            # and "0ms" next to a check invites the reader to doubt it ran at all. Below the
+            # threshold, say nothing rather than something meaningless.
+            tail = fmt_duration(elapsed) if elapsed >= 0.01 else ""
         console.print(f"{marker} [muted]Phase {index}/{total} ·[/muted] "
-                      f"[bold accent]{title}[/bold accent]  "
-                      f"[muted]{fmt_duration(time.monotonic() - start)}[/muted]")
+                      f"[bold accent]{title}[/bold accent]  [muted]{tail}[/muted]")
+        if pinned.active():
+            pinned.repaint()
+
+
+def mark_skipped(entry, why=""):
+    """Mark the RUNNING phase as skipped rather than done (call with `phase()`'s entry).
+
+    For a phase that was entered, found nothing to do, and should not claim a ✓.
+    """
+    entry["status"] = "skipped"
+    entry["why"] = why
+
+
+def skip_phase(title, why=""):
+    """Record a phase as skipped WITHOUT entering it, and still print its line.
+
+    For a phase decided against before it starts (a flag turned it off, a prerequisite
+    made it moot). It prints rather than silently advancing because a step the user
+    never sees is indistinguishable from one that failed quietly — and it keeps k/N
+    honest, since the denominator already counted this phase.
+    """
+    entry = next((p for p in _phases if p["title"] == title), None)
+    if entry is None:
+        _phases.append({"title": title, "status": "pending"})
+        entry = _phases[-1]
+    entry["status"], entry["why"] = "skipped", why
+    index, total = _phases.index(entry) + 1, len(_phases)
+    console.print(f"{_PHASE_MARKERS['skipped']} [muted]Phase {index}/{total} ·[/muted] "
+                  f"[bold accent]{title}[/bold accent]  [muted]{why or 'skipped'}[/muted]")
+    if pinned.active():
+        pinned.repaint()
 
 
 def _body_print(renderable):
@@ -619,6 +835,23 @@ def stepper_line_for(title):
     return stepper_line()
 
 
+def _read_choice(prompt_text, count, default=1):
+    """The read loop behind every menu: a number, empty for the default, or q."""
+    while True:
+        try:
+            raw = input(f"{prompt_text} [1-{count}, or q to quit] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            return None
+        if raw == "":
+            return default - 1
+        if raw.lower() in ("q", "quit", "n", "no"):
+            return None
+        if raw.isdigit() and 1 <= int(raw) <= count:
+            return int(raw) - 1
+        console.print(f"[muted]Enter a number from 1 to {count}, or q.[/muted]")
+
+
 def choose(prompt_text, options, default=1):
     """A numbered menu. Returns the chosen index (0-based), or None if declined.
 
@@ -632,16 +865,32 @@ def choose(prompt_text, options, default=1):
     for i, label in enumerate(options, 1):
         console.print(f"  [accent.bold]{i}[/accent.bold]  {label}")
     console.print()
-    while True:
-        try:
-            raw = input(f"{prompt_text} [1-{len(options)}, or q to quit] ").strip()
-        except (EOFError, KeyboardInterrupt):
-            console.print()
-            return None
-        if raw == "":
-            return default - 1
-        if raw.lower() in ("q", "quit", "n", "no"):
-            return None
-        if raw.isdigit() and 1 <= int(raw) <= len(options):
-            return int(raw) - 1
-        console.print(f"[muted]Enter a number from 1 to {len(options)}, or q.[/muted]")
+    return _read_choice(prompt_text, len(options), default)
+
+
+def choose_rows(prompt_text, rows, default=1):
+    """`choose()` over COLUMNS instead of pre-joined strings.
+
+    Each row is `(marker, name, meta, note)`. Columns are why this exists: glued into one
+    string, a long name pushes every following field out of alignment, and a blocked entry's
+    reason ends up trailing a parenthesis where it reads as part of the name. Given its own
+    column, the reason lines up under the others and the eye can skip it.
+
+    The marker column is reserved even when every row is fine, so adding one ✗ row does not
+    re-indent the whole menu.
+    """
+    if activity.running():
+        activity.stop()
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(justify="right", no_wrap=True)                  # number
+    grid.add_column(no_wrap=True, width=1)                          # ✓/✗ marker
+    grid.add_column(no_wrap=True, style="bold")                     # name
+    grid.add_column(no_wrap=True, style="muted")                    # what it is
+    grid.add_column(overflow="fold", style="warning")               # why it cannot run
+    for i, (marker, name, meta, note) in enumerate(rows, 1):
+        grid.add_row(f"[accent.bold]{i}[/accent.bold]",
+                     "[error]✗[/error]" if marker else "",
+                     Text(name), Text(meta or ""), Text(note or ""))
+    console.print(Padding(grid, (0, 0, 0, 2)))
+    console.print()
+    return _read_choice(prompt_text, len(rows), default)

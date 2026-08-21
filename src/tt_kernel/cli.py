@@ -298,6 +298,7 @@ def start(
     ),
     token: Optional[str] = typer.Option(None, "--token", help="Hugging Face token (else $HF_TOKEN, the HF token store, or a prompt)."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Never prompt; fail instead if something is missing."),
+    force: bool = typer.Option(False, "--force", help="Install despite non-fatal mismatches."),
     port: int = typer.Option(8000, "--port", help="Port to serve on."),
     print_only: bool = typer.Option(False, "--print", help="Print the launch command instead of running it."),
     local_only: bool = typer.Option(False, "--local-only", help="Require an installed bundle; never hit the Hub."),
@@ -310,20 +311,39 @@ def start(
     """
     extra_args = list(ctx.args)
 
+    # `ignore_unknown_options` is on so that flags meant for vLLM can be forwarded, which
+    # means click hands an option-shaped token to the `model` ARGUMENT rather than rejecting
+    # it: `tt-model start --force` went looking for a Hub repo literally named "--force". No
+    # model id starts with a dash, so treat such a token as the flag it is and pick a model
+    # the normal way.
+    if model and model.startswith("-"):
+        extra_args.insert(0, model)
+        model = None
+
     # No model given: offer what is installed rather than erroring. A guided command that
     # answers "Missing argument 'model'." has failed at the one thing it exists to do.
+    # The roadmap goes up FIRST — before the model picker, which prompts. Printed after
+    # the prompt, it told the user what the run would do only once they had already
+    # committed to it, and the menu appeared against an empty screen with no frame.
+    console.register_phases(start_mod.PHASES)
+    # Claim the screen FIRST: the step list lives at the top and everything below scrolls
+    # under it. Pinning after the panel printed the panel into the region and then
+    # overprinted it from row 1 down. Released before the vLLM handoff below — and by
+    # atexit/SIGTERM on any path that does not reach it.
+    console.pin_stepper()
+    # The panel carries what the one-line stepper has no room for: what each step actually
+    # does. Printed once, below the header, into the scrolling body.
+    console.console.print(console.steps_panel_lines(
+        "tt-model", [(t, start_mod.PHASE_DETAIL[t]) for t in start_mod.PHASES]))
+
     picked_note = None
     if not model:
         model, picked_note = _pick_model(
             interactive=not yes and start_mod.stdin_is_interactive())
 
-    console.register_phases(start_mod.PHASES)
-    console.console.print(console.steps_panel_lines(
-        "tt-model", [(t, start_mod.PHASE_DETAIL[t]) for t in start_mod.PHASES]))
-
     # ---- 1. Account. The prompt lives OUTSIDE any step(): a capturing step would swallow
     # it and the CLI would appear to hang waiting on input nobody can see.
-    with console.phase("Account"):
+    with console.phase("Account") as ph:
         allow_prompt = not yes and start_mod.stdin_is_interactive()
         account = start_mod.resolve_account(token, allow_prompt=allow_prompt)
         if account.logged_in:
@@ -331,6 +351,7 @@ def start(
                          marker="✓", style="success")
         else:
             console.note("not logged in — public bundles only", marker="○", style="muted")
+            console.mark_skipped(ph, "no token — public bundles only")
 
     # ---- 2. Validate. Raised through the phase so the stepper shows ✗, with the card
     # rendered after it collapses rather than above its own phase line.
@@ -342,10 +363,6 @@ def start(
                 tbl.add_row("[success]✓[/success]" if c.adequate else "[error]✗[/error]",
                             c.name, console.fmt_version(c.version),
                             f"require >= {c.required}")
-            tbl.add_row("[success]✓[/success]" if env.arch else "[warning]![/warning]",
-                        "hardware", env.arch or "none detected",
-                        f"{env.device_count} device(s) via {env.device_source}"
-                        if env.arch else "")
             tbl.add_row("[success]✓[/success]" if env.port_free else "[error]✗[/error]",
                         f"port {env.port}", "free" if env.port_free else "in use", "")
             console.print_table(tbl)
@@ -357,7 +374,23 @@ def start(
     except _PreflightFailed:
         raise _start_blocked(env.blockers, env)
 
-    # ---- 3. Model.
+    # ---- 3. Hardware. Reuses the probe Validate already did — tt-smi is not free, and
+    # asking twice could report two different device counts within one run.
+    with console.phase("Hardware") as ph:
+        tbl = console.check_table()
+        tbl.add_row("[success]✓[/success]" if env.arch else "[warning]![/warning]",
+                    env.arch or "no device", f"{env.device_count} device(s)",
+                    f"via {env.device_source}" if env.device_source else "")
+        console.print_table(tbl)
+        if not env.arch:
+            # Not a blocker: --print needs no card, and the mesh check that really matters
+            # happens against the bundle's manifest at pull time. But it must not read as a
+            # passed check either.
+            console.note("no Tenstorrent device detected — tt-smi found no card",
+                         marker="!", style="warning")
+            console.mark_skipped(ph, "no card detected")
+
+    # ---- 4. Model.
     with console.phase("Model"):
         repo_id, how = start_mod.resolve_bundle(model)
         console.note(f"{repo_id} — {picked_note or how}", marker="○", style="muted")
@@ -365,12 +398,17 @@ def start(
             if local_only:
                 raise _err(f"No installed bundle for {repo_id} (and --local-only forbids a pull).")
             _ensure_vllm_pulled(repo_id, None, arch=arch, bundles_dir=None,
-                                instance=instance)
+                                force=force, instance=instance)
         console.milestone(f"ready: {repo_id}")
 
-    # ---- 4. Serve. The phase is closed before handing the terminal to vLLM: a still-
+    # ---- 5. Serve. The phase is closed before handing the terminal to vLLM: a still-
     # ticking spinner and a foreground child would fight for the same row.
-    console.console.print(console.stepper_line_for("Serve"))
+    # The child owns the terminal from here: repaint the header one last time, then hand
+    # the full screen back. A foreground process printing inside our scroll region, under a
+    # header that stops updating, is worse than no header at all.
+    console.stepper_line_for("Serve")
+    console.show_stepper()
+    console.pinned.release()
     _serve_vllm(repo_id, None, print_only=print_only, local_only=True, arch=arch,
                 bundles_dir=None, do_health=False, instance=instance,
                 extra_args=(["--port", str(port)] if port != 8000 else []) + extra_args)
@@ -437,8 +475,8 @@ def _pick_model(*, interactive: bool) -> "tuple[str, str]":
             "[warning]![/warning] None of these can serve in this environment yet — "
             "pick one to see what it needs.")
     console.console.print("[bold accent]Which model?[/bold accent]")
-    labels = [("" if c.servable else "[error]✗[/error] ") + c.label for c in choices]
-    index = console.choose("Serve", labels)
+    index = console.choose_rows("Serve", [
+        (not c.servable, c.repo_id, c.meta, c.blocked_by or "") for c in choices])
     if index is None:
         raise typer.Exit(code=1)
     chosen = choices[index]

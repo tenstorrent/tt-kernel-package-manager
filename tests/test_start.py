@@ -8,6 +8,7 @@ these assert on completing at all rather than on output. They are cheap; a hang 
 not.
 """
 
+import inspect
 import os
 import subprocess
 import sys
@@ -177,7 +178,7 @@ def test_every_phase_has_a_description():
 
 def test_phase_count_is_fixed_and_not_flag_dependent():
     """k/N is only trustworthy if N cannot drift with flags."""
-    assert len(start.PHASES) == 4
+    assert len(start.PHASES) == 5
 
 
 # ── did-you-mean for a slipped word (F5) ─────────────────────────────────────
@@ -262,7 +263,7 @@ class TestPickModel:
         model. With a TTY, always show the list."""
         self._entries(monkeypatch, [
             {"repo_id": "org/only", "bundle_path": "/tmp/x", "backend": "vllm"}])
-        monkeypatch.setattr(cli.console, "choose", lambda *a, **k: 0)
+        monkeypatch.setattr(cli.console, "choose_rows", lambda *a, **k: 0)
         repo, note = cli._pick_model(interactive=True)
         assert repo == "org/only"
 
@@ -271,7 +272,7 @@ class TestPickModel:
         unambiguous rather than a guess."""
         self._entries(monkeypatch, [
             {"repo_id": "org/only", "bundle_path": "/tmp/x", "backend": "vllm"}])
-        monkeypatch.setattr(cli.console, "choose", _must_not_be_called)
+        monkeypatch.setattr(cli.console, "choose_rows", _must_not_be_called)
         repo, note = cli._pick_model(interactive=False)
         assert repo == "org/only"
         assert "only installed" in note
@@ -290,7 +291,7 @@ class TestPickModel:
         self._entries(monkeypatch, [
             {"repo_id": "org/a", "bundle_path": "/tmp/x"},
             {"repo_id": "org/b", "bundle_path": "/tmp/x"}])
-        monkeypatch.setattr(cli.console, "choose", lambda *a, **k: 1)
+        monkeypatch.setattr(cli.console, "choose_rows", lambda *a, **k: 1)
         repo, note = cli._pick_model(interactive=True)
         assert repo == "org/b"
 
@@ -298,7 +299,7 @@ class TestPickModel:
         self._entries(monkeypatch, [
             {"repo_id": "org/a", "bundle_path": "/tmp/x"},
             {"repo_id": "org/b", "bundle_path": "/tmp/x"}])
-        monkeypatch.setattr(cli.console, "choose", lambda *a, **k: None)
+        monkeypatch.setattr(cli.console, "choose_rows", lambda *a, **k: None)
         with pytest.raises(typer.Exit):
             cli._pick_model(interactive=True)
 
@@ -360,12 +361,16 @@ class TestServabilityGate:
         self._entries(monkeypatch, [{"repo_id": "org/broken", "bundle_path": "/b"}])
         self._servability(monkeypatch, {"/b": (False, "models is not importable")})
         seen = {}
-        monkeypatch.setattr(cli.console, "choose",
-                            lambda prompt, labels, **k: (seen.update(labels=labels), 0)[1])
+        monkeypatch.setattr(cli.console, "choose_rows",
+                            lambda prompt, rows, **k: (seen.update(rows=rows), 0)[1])
         repo, note = cli._pick_model(interactive=True)
         assert repo == "org/broken"
         assert "despite" in note, note
-        assert any("✗" in l for l in seen["labels"]), "the menu did not mark it unrunnable"
+        # The ✗ is the renderer's job now; the row carries the flag and the reason, each in
+        # its own field, so this asserts the meaning rather than the glyph.
+        marked, _name, _meta, reason = seen["rows"][0]
+        assert marked, "the menu did not flag it unrunnable"
+        assert reason == "models is not importable", reason
 
     def test_a_single_servable_bundle_is_taken_when_we_cannot_ask(self, monkeypatch):
         self._entries(monkeypatch, [{"repo_id": "org/ok", "bundle_path": "/ok"}])
@@ -471,3 +476,92 @@ class TestUnregisteredBundles:
         servable, reason = start._servability(str(d))
         assert servable is False
         assert "models" in reason
+
+
+# ── skipped phases stay visible ──────────────────────────────────────────────
+class TestSkippedPhases:
+    """A skipped phase must render as skipped. Silently advancing past it is
+    indistinguishable from a quiet failure, and marking it done claims work that never
+    happened — both leave k/N describing a run that did not occur."""
+
+    def test_skipped_phase_is_not_pending_in_the_stepper(self):
+        console.register_phases(["A", "B", "C"])
+        console.skip_phase("B", "nothing to do")
+        line = console.stepper_line().plain
+        assert "⊘ B" in line, line
+        assert "○ B" not in line, "skipped rendered as pending — reads as a stalled run"
+
+    def test_a_body_can_mark_its_own_phase_skipped(self):
+        console.register_phases(["A"])
+        with console.phase("A") as ph:
+            console.mark_skipped(ph, "no token")
+        assert "⊘ A" in console.stepper_line().plain
+
+    def test_marking_skipped_survives_the_phase_exit(self):
+        """`phase()` used to stamp "done" unconditionally on clean exit."""
+        console.register_phases(["A"])
+        with console.phase("A") as ph:
+            console.mark_skipped(ph)
+        assert console._phases[0]["status"] == "skipped"
+
+    def test_a_failure_still_wins_over_a_skip(self):
+        console.register_phases(["A"])
+        with pytest.raises(RuntimeError):
+            with console.phase("A") as ph:
+                console.mark_skipped(ph, "decided against")
+                raise RuntimeError("boom")
+        assert console._phases[0]["status"] == "failed"
+
+
+def test_the_pin_is_claimed_before_anything_is_printed():
+    """Regression: pinning after the panel printed the panel INTO the region, then homed the
+    cursor to the region's top row and overprinted it — the panel and the picker interleaved
+    on screen. DECSTBM homes the cursor, so the region must be claimed before any output."""
+    src = inspect.getsource(cli.start)
+    assert src.index("pin_stepper") < src.index("steps_panel_lines"), \
+        "the screen is claimed after output was already printed to it"
+
+
+def test_roadmap_precedes_the_model_prompt():
+    """The panel is the frame the picker sits in; printed after it, the menu appears
+    against a blank screen and the user commits before seeing what the run will do."""
+    src = inspect.getsource(cli.start)
+    assert src.index("steps_panel_lines") < src.index("_pick_model"), \
+        "roadmap panel is printed after the picker"
+
+
+# ── option-shaped tokens are flags, not model ids ────────────────────────────
+class TestFlagsAreNotModelIds:
+    """`start` forwards unknown flags to vLLM, so click is configured with
+    ignore_unknown_options — and click then fills the `model` ARGUMENT with the first
+    option-shaped token instead of rejecting it. `tt-model start --force` tried to pull a
+    Hub repo named "--force", and the advice to re-run with --force came from start itself.
+    """
+
+    def test_force_is_a_real_option(self):
+        res = runner.invoke(cli.app, ["start", "--help"])
+        assert "--force" in res.output, "start advertises --force in failures but rejects it"
+
+    def test_a_leading_flag_does_not_become_the_model(self, monkeypatch):
+        picked = {}
+        monkeypatch.setattr(cli, "_pick_model",
+                            lambda **k: (picked.setdefault("asked", True), ("org/m", "picked"))[1])
+        monkeypatch.setattr(cli.start_mod, "validate", lambda *a, **k: None)
+        monkeypatch.setattr(cli.start_mod, "resolve_account",
+                            lambda *a, **k: start.Account(logged_in=False, name=None,
+                                                          source=None))
+        runner.invoke(cli.app, ["start", "--force", "--yes"])
+        assert picked.get("asked"), "a flag was taken as the model id instead of prompting"
+
+    def test_force_reaches_the_install(self, monkeypatch):
+        """Without this the flag parses and is silently dropped, which is worse than the
+        crash it replaced: the user is told the override worked when nothing overrode."""
+        seen = {}
+        monkeypatch.setattr(cli, "_ensure_vllm_pulled", lambda *a, **k: seen.update(k) or {})
+        monkeypatch.setattr(cli.start_mod, "is_installed", lambda r: False)
+        monkeypatch.setattr(cli.start_mod, "validate", lambda *a, **k: start.Environment(
+            report=_report(True), arch="blackhole", device_count=4, device_source="tt-smi",
+            port=8000, port_free=True, conflicts=[]))
+        monkeypatch.setattr(cli, "_serve_vllm", lambda *a, **k: None)
+        res = runner.invoke(cli.app, ["start", "org/m", "--yes", "--force", "--print"])
+        assert seen.get("force") is True, (seen, res.output)

@@ -206,3 +206,76 @@ class TestHelpGrouping:
         res = run([cmd, "--help"], columns=100)
         assert res.returncode == 0, res.stderr
         assert "\x1b" not in res.stdout
+
+
+# ── the pinned stepper (DECSTBM scroll region) ───────────────────────────────
+class TestPinnedStepper:
+    """The scroll region is the one piece of output state that outlives the process: a run
+    that exits without releasing it leaves the user's shell scrolling inside a box until
+    they type `reset`. These guard the release paths and the refusals.
+    """
+
+    def test_no_pin_without_a_tty(self, monkeypatch):
+        monkeypatch.setattr(console, "_isatty", lambda: False)
+        console.pinned.engage()
+        assert not console.pinned.active(), "fenced off a pipe's scroll region"
+
+    def test_no_pin_when_opted_out(self, monkeypatch):
+        monkeypatch.setattr(console, "_isatty", lambda: True)
+        monkeypatch.setenv("TT_MODEL_NO_PIN", "1")
+        console.pinned.engage()
+        assert not console.pinned.active()
+
+    def test_no_pin_under_verbose(self, monkeypatch):
+        """-v exists to produce a transcript worth piping into a file; a scroll region
+        corrupts one."""
+        monkeypatch.setattr(console, "_isatty", lambda: True)
+        monkeypatch.delenv("TT_MODEL_NO_PIN", raising=False)
+        monkeypatch.setattr(console, "_VERBOSE", True)
+        console.pinned.engage()
+        assert not console.pinned.active()
+
+    def test_no_pin_on_a_terminal_too_short_to_spare_the_rows(self, monkeypatch):
+        monkeypatch.setattr(console, "_isatty", lambda: True)
+        monkeypatch.delenv("TT_MODEL_NO_PIN", raising=False)
+        monkeypatch.setattr(console.shutil, "get_terminal_size",
+                            lambda *a: os.terminal_size((80, 4)))
+        console.pinned.engage()
+        assert not console.pinned.active()
+
+    def test_release_is_idempotent(self):
+        """Called from atexit AND explicitly before the serve handoff, so it must tolerate
+        running twice."""
+        console.pinned.release()
+        console.pinned.release()
+        assert not console.pinned.active()
+
+    def test_show_stepper_falls_back_to_inline_when_unpinned(self, capsys):
+        console.register_phases(["A", "B"])
+        console.pinned._on = False
+        console.show_stepper()
+        assert "A" in capsys.readouterr().out, "unpinned run showed no stepper at all"
+
+    def test_release_saves_and_restores_the_cursor(self, monkeypatch):
+        """Resetting the scroll region HOMES the cursor on a real terminal (xterm does;
+        pyte does not, which is why an emulator-only check missed this). Without the
+        DECSC/DECRC pair the shell's next prompt — and the next command's whole output —
+        lands on row 1-2, printing over the run that just finished."""
+        written = []
+        monkeypatch.setattr(console, "_isatty", lambda: True)
+        monkeypatch.setattr(console._real_console.file, "write", written.append)
+        monkeypatch.setattr(console._real_console.file, "flush", lambda: None)
+        console.pinned._on = True
+        console.pinned.release()
+        seq = "".join(written)
+        assert "\033[r" in seq, "never reset the scroll region"
+        assert seq.index("\0337") < seq.index("\033[r") < seq.index("\0338"), \
+            "reset the region without saving/restoring the cursor around it"
+
+    def test_the_header_is_the_stepper_plus_a_rule(self):
+        console.register_phases(["A", "B"])
+        rows = console.header_rows()
+        assert len(rows) == console.pin_height() == 2, rows
+        assert "A" in rows[0] and "B" in rows[0], "row 1 is not the stepper"
+        assert set(rows[1].replace("[muted]", "").replace("[/muted]", "")) == {"─"}, \
+            "row 2 is not a plain rule"

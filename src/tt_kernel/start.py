@@ -23,10 +23,15 @@ from typing import List, Optional, Tuple
 
 from . import auth, console, hub, localdb, metal, runtime, toolchain
 
-PHASES = ["Account", "Validate", "Model", "Serve"]
+PHASES = ["Account", "Validate", "Hardware", "Model", "Serve"]
 PHASE_DETAIL = {
     "Account": "Hugging Face token",
-    "Validate": "tt-metal, vLLM, hardware",
+    "Validate": "tt-metal, vLLM, port",
+    # Its own step, not a row in Validate: it answers a different question (is there a card,
+    # and how many chips) from a different source (tt-smi, not the Python env), and its
+    # answer is what the bundle's mesh has to match. Folded into the toolchain table it read
+    # as one more version check.
+    "Hardware": "tt-smi: arch + device count",
     "Model": "resolve + pull the bundle",
     "Serve": "launch the OpenAI server",
 }
@@ -152,6 +157,10 @@ class Choice:
     label: str
     servable: bool = True
     blocked_by: Optional[str] = None
+    # What the bundle IS (backend · arch · …), without the reason it cannot run. The menu
+    # renders the two in separate columns; `label` keeps them joined for callers that want
+    # one string.
+    meta: str = ""
 
 
 def _servability(bundle_path: str) -> Tuple[bool, Optional[str]]:
@@ -223,6 +232,7 @@ def installed_choices(*, check_servable: bool = True) -> List[Choice]:
         bits = [b for b in (e.get("backend"), e.get("arch")) if b]
         if e.get("self_contained"):
             bits.append("self-contained")
+        meta = " · ".join(bits)
         servable, blocked = (True, None)
         if check_servable:
             servable, blocked = _servability(bundle_path)
@@ -230,7 +240,7 @@ def installed_choices(*, check_servable: bool = True) -> List[Choice]:
             bits.append(blocked)
         suffix = f"  ({' · '.join(bits)})" if bits else ""
         out.append(Choice(repo_id=repo_id, label=f"{repo_id}{suffix}",
-                          servable=servable, blocked_by=blocked))
+                          servable=servable, blocked_by=blocked, meta=meta))
 
     for repo_id, path in unregistered_bundles():
         servable, blocked = (True, None)
@@ -238,6 +248,7 @@ def installed_choices(*, check_servable: bool = True) -> List[Choice]:
             servable, blocked = _servability(path)
         bits = ["on disk, not indexed"] + ([blocked] if blocked else [])
         out.append(Choice(repo_id=repo_id, label=f"{repo_id}  ({' · '.join(bits)})",
-                          servable=servable, blocked_by=blocked))
+                          servable=servable, blocked_by=blocked,
+                          meta="on disk, not indexed"))
     # Servable first, so a menu default is never a bundle we know cannot run.
     return sorted(out, key=lambda c: (not c.servable, c.repo_id))
