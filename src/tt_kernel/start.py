@@ -150,10 +150,33 @@ def is_installed(repo_id: str) -> bool:
 class Choice:
     repo_id: str
     label: str
+    servable: bool = True
+    blocked_by: Optional[str] = None
 
 
-def installed_choices() -> List[Choice]:
-    """Installed bundles, newest-looking first, as menu entries.
+def _servability(bundle_path: str) -> Tuple[bool, Optional[str]]:
+    """Can this bundle's serving adapter actually be imported here?
+
+    Checked at pick time, not just before launch. Auto-selecting "the only installed
+    bundle" and then discovering at phase 4 that its adapter was never installed wastes the
+    user's time and makes the guided path feel like it is guessing.
+    """
+    from pathlib import Path
+
+    from . import bundles
+
+    try:
+        md = bundles.read_vllm_metadata(Path(bundle_path))
+    except Exception:  # noqa: BLE001 — unreadable metadata is a different problem
+        return True, None
+    root = runtime.adapter_root(getattr(md, "main_class", "") or "")
+    if root and not runtime.module_importable(root):
+        return False, f"{root} is not importable"
+    return True, None
+
+
+def installed_choices(*, check_servable: bool = True) -> List[Choice]:
+    """Installed bundles as menu entries, each marked with whether it can serve here.
 
     `tt-model start` with no argument used to be a bare "Missing argument 'model'." — which
     is the one thing a guided command should not do. If there is something to serve, offer
@@ -162,11 +185,19 @@ def installed_choices() -> List[Choice]:
     out: List[Choice] = []
     for e in localdb.all_entries():
         repo_id = e.get("repo_id")
-        if not repo_id or not e.get("bundle_path"):
+        bundle_path = e.get("bundle_path")
+        if not repo_id or not bundle_path:
             continue
         bits = [b for b in (e.get("backend"), e.get("arch")) if b]
         if e.get("self_contained"):
             bits.append("self-contained")
+        servable, blocked = (True, None)
+        if check_servable:
+            servable, blocked = _servability(bundle_path)
+        if not servable and blocked:
+            bits.append(blocked)
         suffix = f"  ({' · '.join(bits)})" if bits else ""
-        out.append(Choice(repo_id=repo_id, label=f"{repo_id}{suffix}"))
-    return sorted(out, key=lambda c: c.repo_id)
+        out.append(Choice(repo_id=repo_id, label=f"{repo_id}{suffix}",
+                          servable=servable, blocked_by=blocked))
+    # Servable first, so a menu default is never a bundle we know cannot run.
+    return sorted(out, key=lambda c: (not c.servable, c.repo_id))

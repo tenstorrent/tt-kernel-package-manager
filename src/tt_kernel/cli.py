@@ -396,11 +396,36 @@ def _pick_model(*, interactive: bool) -> "tuple[str, str]":
             "[muted]    pull and serve one directly[/muted]",
         ], code=2)
 
-    if len(choices) == 1:
+    servable = [c for c in choices if c.servable]
+
+    if not servable:
+        # Auto-selecting a bundle we already know cannot run is worse than naming none: it
+        # walks the user through three phases to fail at the fourth on something knowable
+        # before the first. Only auto-pick what can actually serve.
+        lines = ["[error]Nothing installed here can serve.[/error]", ""]
+        for c in choices:
+            lines.append(f"[muted]  {c.repo_id}[/muted]"
+                         + (f"  [error]{c.blocked_by}[/error]" if c.blocked_by else ""))
+        lines += ["", "[warning]Nothing was pulled or started.[/warning]", "",
+                  "[info]Try:[/info]",
+                  "  tt-model info <id>",
+                  "[muted]    what the bundle needs[/muted]",
+                  "  tt-model search --catalog",
+                  "[muted]    find a bundle whose adapter is present here[/muted]",
+                  "  tt-model start <id>",
+                  "[muted]    force one anyway — it will stop at the same check[/muted]"]
+        raise _fail_panel("No model to start", lines, code=2)
+
+    if len(servable) == 1 and len(choices) == 1:
         # Nothing to choose between, so don't make the user choose. The provenance is
         # returned rather than printed here: this runs before the roadmap, and a note above
         # the panel reads like output from a previous command.
-        return choices[0].repo_id, "the only installed bundle"
+        return servable[0].repo_id, "the only installed bundle"
+
+    if len(servable) == 1:
+        return servable[0].repo_id, "the only installed bundle that can serve here"
+
+    choices = servable + [c for c in choices if not c.servable]
 
     if not interactive:
         raise _fail_panel("No model to start", [

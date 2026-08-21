@@ -294,3 +294,81 @@ def test_model_argument_is_optional():
     """The signature is the contract: a required argument makes the guided path impossible."""
     res = runner.invoke(cli.app, ["start", "--help"])
     assert "[{model}]" in res.output or "Omit to pick" in res.output
+
+
+# ── never auto-pick a bundle that cannot serve ───────────────────────────────
+class TestServabilityGate:
+    def _entries(self, monkeypatch, entries):
+        monkeypatch.setattr(start.localdb, "all_entries", lambda: entries)
+
+    def _servability(self, monkeypatch, mapping):
+        monkeypatch.setattr(start, "_servability",
+                            lambda path: mapping.get(path, (True, None)))
+
+    def test_the_only_bundle_being_unservable_is_not_auto_picked(self, monkeypatch):
+        """Auto-selecting a bundle already known to be unrunnable walked the user through
+        three phases to fail at the fourth on something knowable before the first."""
+        self._entries(monkeypatch, [
+            {"repo_id": "org/broken", "bundle_path": "/b"}])
+        self._servability(monkeypatch, {"/b": (False, "models is not importable")})
+        res = runner.invoke(cli.app, ["start", "--yes"])
+        assert res.exit_code == 2
+        assert "Nothing installed here can serve" in res.output
+        assert "models is not importable" in res.output
+
+    def test_the_reason_is_named_per_bundle(self, monkeypatch):
+        self._entries(monkeypatch, [
+            {"repo_id": "org/a", "bundle_path": "/a"},
+            {"repo_id": "org/b", "bundle_path": "/b"}])
+        self._servability(monkeypatch, {"/a": (False, "models is not importable"),
+                                       "/b": (False, "models is not importable")})
+        res = runner.invoke(cli.app, ["start", "--yes"])
+        assert res.output.count("models is not importable") >= 2
+
+    def test_a_single_servable_bundle_is_still_auto_picked(self, monkeypatch):
+        self._entries(monkeypatch, [{"repo_id": "org/ok", "bundle_path": "/ok"}])
+        self._servability(monkeypatch, {})
+        repo, note = cli._pick_model(interactive=False)
+        assert repo == "org/ok"
+
+    def test_the_one_servable_bundle_wins_over_broken_siblings(self, monkeypatch):
+        """With exactly one runnable candidate there is nothing to choose between, even
+        though other bundles are installed."""
+        self._entries(monkeypatch, [
+            {"repo_id": "org/broken", "bundle_path": "/b"},
+            {"repo_id": "org/works", "bundle_path": "/w"}])
+        self._servability(monkeypatch, {"/b": (False, "models is not importable")})
+        repo, note = cli._pick_model(interactive=False)
+        assert repo == "org/works"
+        assert "can serve here" in note
+
+    def test_servable_bundles_sort_first_so_the_default_is_never_broken(self, monkeypatch):
+        self._entries(monkeypatch, [
+            {"repo_id": "org/aaa-broken", "bundle_path": "/b"},
+            {"repo_id": "org/zzz-works", "bundle_path": "/w"}])
+        self._servability(monkeypatch, {"/b": (False, "models is not importable")})
+        choices = start.installed_choices()
+        assert choices[0].repo_id == "org/zzz-works", "a broken bundle sorted to the default"
+
+    def test_an_explicit_id_is_still_honoured(self, monkeypatch):
+        """The gate is about *picking for* the user. Naming a bundle explicitly must still
+        work — it stops at the serve preflight, which says the same thing with more detail."""
+        self._entries(monkeypatch, [{"repo_id": "org/broken", "bundle_path": "/b"}])
+        self._servability(monkeypatch, {"/b": (False, "models is not importable")})
+        monkeypatch.setattr(start, "validate", lambda *a, **k: start.Environment(
+            report=_report(True), arch="blackhole", device_count=4, device_source="tt-smi",
+            port=8000, port_free=True, conflicts=[]))
+        res = runner.invoke(cli.app, ["start", "org/broken", "--yes", "--print"])
+        assert "Nothing installed here can serve" not in res.output
+
+    def test_unreadable_metadata_does_not_mark_a_bundle_unservable(self, tmp_path):
+        """Fail open: a metadata problem is a different failure, and guessing "unservable"
+        would hide a bundle that works."""
+        servable, reason = start._servability(str(tmp_path / "missing"))
+        assert servable is True and reason is None
+
+    def test_servability_check_can_be_skipped(self, monkeypatch):
+        """It spawns a subprocess per bundle; callers that only need labels can opt out."""
+        self._entries(monkeypatch, [{"repo_id": "org/a", "bundle_path": "/a"}])
+        monkeypatch.setattr(start, "_servability", _must_not_be_called)
+        assert start.installed_choices(check_servable=False)[0].servable is True

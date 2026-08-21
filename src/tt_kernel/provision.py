@@ -181,15 +181,12 @@ def check(venv: Optional[str] = None, *, vllm_ref: str = DEFAULT_VLLM_REF,
 
     pre.ttnn_ok = can_import(target.python, "ttnn")
     if not pre.ttnn_ok:
-        # Two real ways forward. The PyPI one is a single command that people have been
-        # missing entirely, because the old wording framed tt-metal as built-separately and
-        # out of scope — which reads as a dead end rather than a one-liner.
-        pre.routes.append((f'pip install "{TTNN_PYPI_SPEC}"', "~250MB from PyPI, no build"))
-        cands = ttnn_candidates()
-        if cands:
-            pre.routes.append((f"tt-model install --venv {Path(cands[0][1]).parent.parent}",
-                               "a tt-metal already built on this box"))
-        else:
+        # Share one remedy builder with `start`, so the same question gets the same answer.
+        # These cards used to diverge: `start` named the venv on this box that already had
+        # ttnn while `install` offered a generic <tt-metal>/python_env placeholder, so the
+        # more useful hint depended on which command you happened to run.
+        pre.routes.extend(ttnn_remedy(target.python))
+        if len(pre.routes) == 1:
             pre.routes.append(("tt-model install --venv <tt-metal>/python_env",
                                "a tt-metal you built yourself"))
         if not allow_no_ttnn:
