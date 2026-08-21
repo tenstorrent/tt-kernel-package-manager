@@ -125,6 +125,20 @@ def is_private_safe(repo_id: str) -> Optional[bool]:
         return None
 
 
+def latest_revision(repo_id: str, revision: Optional[str] = None) -> Optional[str]:
+    """Best-effort commit sha for the repo at ``revision`` (default: the default-branch tip).
+
+    ``serve`` uses this to tell an installed bundle apart from a newer published one, and
+    ``pull``/install records it so that comparison has a baseline. Returns None when the Hub
+    can't be reached or the repo/revision isn't found — an update check (or recording one)
+    must never be the thing that fails a serve or an install.
+    """
+    try:
+        return getattr(_api().model_info(repo_id, revision=revision), "sha", None)
+    except Exception:  # noqa: BLE001 — offline / 404 / permission: "unknown", never fatal
+        return None
+
+
 def download_bundle(repo_id: str, revision: Optional[str], dest: Optional[str] = None) -> Path:
     """Snapshot-download a bundle and return the local snapshot path."""
     from huggingface_hub import snapshot_download

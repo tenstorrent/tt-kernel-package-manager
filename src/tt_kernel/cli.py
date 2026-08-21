@@ -912,6 +912,7 @@ def pull(
             _install_self_contained(
                 repo_id, snapshot, manifest, force=force, arch=arch,
                 models_dir=models_dir, with_weights=with_weights and not no_weights,
+                revision=revision,
             )
             return
 
@@ -1176,7 +1177,7 @@ def _select_instance(manifest, *, arch, instance_override, force):
 
 
 def _install_self_contained(
-    repo_id, snapshot, manifest, *, force, arch, models_dir, with_weights,
+    repo_id, snapshot, manifest, *, force, arch, models_dir, with_weights, revision=None,
 ) -> None:
     """Install a v5 self-contained bundle: materialize it, build its own venv, (optionally) weights.
 
@@ -1236,12 +1237,45 @@ def _install_self_contained(
         "arch": manifest.arch,
         "weights": manifest.weights.repo_id if manifest.weights else None,
         "weights_path": str(weights_path) if weights_path else None,
+        # Resolved commit sha of what we installed, so `serve` can tell it apart from a newer
+        # published revision. `pinned` means the user asked for a specific @revision — don't
+        # nag them to update off a version they deliberately chose. Best-effort (may be None).
+        "revision": hub.latest_revision(repo_id, revision),
+        "pinned": revision is not None,
     })
     typer.secho(f"✓ installed self-contained bundle -> {dest}", fg=typer.colors.GREEN)
     if not weights_path and manifest.weights:
         typer.secho(f"  (weights fetched at serve time from {manifest.weights.repo_id}; "
                     "pass --with-weights to pre-download)", fg=typer.colors.CYAN)
     typer.secho(f"  Serve:  tt-model serve {repo_id}", fg=typer.colors.CYAN)
+
+
+def _warn_if_update_available(repo_id: str, entry: dict) -> None:
+    """Best-effort: tell the user a newer bundle revision has been published.
+
+    ``serve`` reuses an already-installed self-contained bundle as-is; without this it would
+    silently keep serving the installed version even after the author pushed a new one. So we
+    compare the recorded install revision against the Hub's current tip and print an advisory
+    (never blocking — a serve must not depend on the Hub being reachable).
+
+    Skips when the install was pinned to an explicit ``@revision`` (the user chose that
+    version) or when no install revision was recorded (an older install predating this check,
+    or an offline install), since there is then no honest baseline to compare against.
+    """
+    if entry.get("pinned"):
+        return
+    installed = entry.get("revision")
+    if not installed:
+        return
+    latest = hub.latest_revision(repo_id)
+    if latest and latest != installed:
+        typer.secho(
+            f"There is an update to {repo_id} "
+            f"(installed {installed[:8]}, latest {latest[:8]}). "
+            f"You should consider pulling:  tt-model pull {repo_id} --force",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
 
 
 def _serve_self_contained(entry: dict, *, print_only: bool, extra_args: Optional[List[str]] = None) -> None:
@@ -1762,6 +1796,8 @@ def serve(
     # toolchain (ttnn/vLLM versions) is irrelevant here — the bundle ships its own — so don't warn.
     entry = localdb.get(repo_id)
     if entry and entry.get("self_contained"):
+        if not local_only:
+            _warn_if_update_available(repo_id, entry)
         _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
         return
     # Not installed yet: if the remote bundle is self-contained, install then serve it (unless
@@ -1776,7 +1812,7 @@ def serve(
                 snapshot = hub.download_bundle(repo_id, revision, dest=td)
                 mani = Manifest.from_json((snapshot / MANIFEST_NAME).read_text())
                 _install_self_contained(repo_id, snapshot, mani, force=force, arch=arch,
-                                        models_dir=None, with_weights=False)
+                                        models_dir=None, with_weights=False, revision=revision)
             entry = localdb.get(repo_id)
             if entry and entry.get("self_contained"):
                 _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
