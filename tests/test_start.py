@@ -307,7 +307,8 @@ class TestServabilityGate:
 
     def test_the_only_bundle_being_unservable_is_not_auto_picked(self, monkeypatch):
         """Auto-selecting a bundle already known to be unrunnable walked the user through
-        three phases to fail at the fourth on something knowable before the first."""
+        three phases to fail at the fourth on something knowable before the first. Only a
+        caller that cannot be asked (--yes, or a piped stdin) gets the refusal."""
         self._entries(monkeypatch, [
             {"repo_id": "org/broken", "bundle_path": "/b"}])
         self._servability(monkeypatch, {"/b": (False, "models is not importable")})
@@ -324,6 +325,20 @@ class TestServabilityGate:
                                        "/b": (False, "models is not importable")})
         res = runner.invoke(cli.app, ["start", "--yes"])
         assert res.output.count("models is not importable") >= 2
+
+    def test_unservable_bundles_are_still_offered_interactively(self, monkeypatch):
+        """Declining to CHOOSE for the user is not the same as declining to LET them
+        choose. They may be about to fix PYTHONPATH, or may just want to see the failure —
+        so the menu still offers it, marked, rather than refusing outright."""
+        self._entries(monkeypatch, [{"repo_id": "org/broken", "bundle_path": "/b"}])
+        self._servability(monkeypatch, {"/b": (False, "models is not importable")})
+        seen = {}
+        monkeypatch.setattr(cli.console, "choose",
+                            lambda prompt, labels, **k: (seen.update(labels=labels), 0)[1])
+        repo, note = cli._pick_model(interactive=True)
+        assert repo == "org/broken"
+        assert "despite" in note, note
+        assert any("✗" in l for l in seen["labels"]), "the menu did not mark it unrunnable"
 
     def test_a_single_servable_bundle_is_still_auto_picked(self, monkeypatch):
         self._entries(monkeypatch, [{"repo_id": "org/ok", "bundle_path": "/ok"}])

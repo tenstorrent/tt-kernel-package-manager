@@ -379,9 +379,11 @@ def start(
 def _pick_model(*, interactive: bool) -> "tuple[str, str]":
     """Resolve which model to serve when the user named none.
 
-    One installed bundle is offered as the default; several get a numbered menu; none gets
-    an explanation of how to find one. Non-interactive callers never see a prompt — they
-    get the single obvious candidate, or a clear failure naming what is available.
+    The rule is that we may decline to *choose for* the user, but we must not decline to
+    *let them choose*. So a bundle whose adapter is missing is never auto-selected — that
+    would walk them through three phases to fail at the fourth — but it is still offered in
+    the menu, marked, because they may be about to fix PYTHONPATH or may simply want to see
+    the failure. Only a non-interactive caller, which cannot be asked, gets a refusal.
     """
     choices = start_mod.installed_choices()
 
@@ -398,48 +400,49 @@ def _pick_model(*, interactive: bool) -> "tuple[str, str]":
 
     servable = [c for c in choices if c.servable]
 
-    if not servable:
-        # Auto-selecting a bundle we already know cannot run is worse than naming none: it
-        # walks the user through three phases to fail at the fourth on something knowable
-        # before the first. Only auto-pick what can actually serve.
-        lines = ["[error]Nothing installed here can serve.[/error]", ""]
-        for c in choices:
-            lines.append(f"[muted]  {c.repo_id}[/muted]"
-                         + (f"  [error]{c.blocked_by}[/error]" if c.blocked_by else ""))
-        lines += ["", "[warning]Nothing was pulled or started.[/warning]", "",
-                  "[info]Try:[/info]",
-                  "  tt-model info <id>",
-                  "[muted]    what the bundle needs[/muted]",
-                  "  tt-model search --catalog",
-                  "[muted]    find a bundle whose adapter is present here[/muted]",
-                  "  tt-model start <id>",
-                  "[muted]    force one anyway — it will stop at the same check[/muted]"]
-        raise _fail_panel("No model to start", lines, code=2)
-
-    if len(servable) == 1 and len(choices) == 1:
-        # Nothing to choose between, so don't make the user choose. The provenance is
-        # returned rather than printed here: this runs before the roadmap, and a note above
-        # the panel reads like output from a previous command.
-        return servable[0].repo_id, "the only installed bundle"
-
+    # Exactly one runnable candidate: nothing to choose between, so don't ask. The
+    # provenance is returned rather than printed — this runs before the roadmap, and a note
+    # above the panel reads like output from a previous command.
     if len(servable) == 1:
-        return servable[0].repo_id, "the only installed bundle that can serve here"
-
-    choices = servable + [c for c in choices if not c.servable]
+        note = ("the only installed bundle" if len(choices) == 1
+                else "the only installed bundle that can serve here")
+        return servable[0].repo_id, note
 
     if not interactive:
+        if not servable:
+            lines = ["[error]Nothing installed here can serve.[/error]", ""]
+            for c in choices:
+                lines.append(f"  {c.repo_id}"
+                             + (f"  [error]{c.blocked_by}[/error]" if c.blocked_by else ""))
+            lines += ["", "[warning]Nothing was pulled or started.[/warning]", "",
+                      "[info]Try:[/info]",
+                      "  tt-model info <id>",
+                      "[muted]    what the bundle needs[/muted]",
+                      "  tt-model search --catalog",
+                      "[muted]    find a bundle whose adapter is present here[/muted]",
+                      f"  tt-model start {choices[0].repo_id}",
+                      "[muted]    run it anyway — it stops at the same check, with detail[/muted]"]
+            raise _fail_panel("No model to start", lines, code=2)
         raise _fail_panel("No model to start", [
-            "[error]No model was named, and several are installed.[/error]",
+            "[error]No model was named, and several can serve.[/error]",
             "",
             "[info]Pick one:[/info]",
-        ] + [f"[muted]  tt-model start {c.repo_id}[/muted]" for c in choices], code=2)
+        ] + [f"  tt-model start {c.repo_id}" for c in servable], code=2)
 
+    # Interactive: offer everything, servable first, unrunnable ones marked so the choice
+    # is informed rather than blocked.
+    if not servable:
+        console.console.print(
+            "[warning]![/warning] None of these can serve in this environment yet — "
+            "pick one to see what it needs.")
     console.console.print("[bold accent]Which model?[/bold accent]")
-    index = console.choose("Serve", [c.label for c in choices])
+    labels = [("" if c.servable else "[error]✗[/error] ") + c.label for c in choices]
+    index = console.choose("Serve", labels)
     if index is None:
         raise typer.Exit(code=1)
-    return choices[index].repo_id, "chosen from the installed bundles"
-
+    chosen = choices[index]
+    return chosen.repo_id, ("chosen from the installed bundles" if chosen.servable
+                            else f"chosen despite {chosen.blocked_by}")
 
 def _start_blocked(blockers: List[str], env) -> "typer.Exit":
     """Stop at Validate, naming the step that actually fixes each blocker.
