@@ -46,6 +46,8 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))  # localdb
     monkeypatch.setenv("TT_MODEL_MODELS_DIR", str(tmp_path / "models"))  # install dir
     monkeypatch.setattr(metal, "local_env", lambda **k: metal.LocalEnv(arch="blackhole", device_count=1))
+    # Never hit the Hub for a revision in unit tests (install records it; serve compares it).
+    monkeypatch.setattr(cli.hub, "latest_revision", lambda *a, **k: "rev-installed")
 
 
 def test_host_incompatible_wheels_flags_python_mismatch():
@@ -92,6 +94,78 @@ def test_pull_installs_self_contained(monkeypatch, tmp_path):
     # the platform install was invoked against the materialized folder
     assert installed["dir"] == Path(entry["install_dir"])
     assert (Path(entry["install_dir"]) / "wheels").is_dir()
+    # install records the resolved revision (baseline for serve's update check), unpinned
+    assert entry["revision"] == "rev-installed"
+    assert entry["pinned"] is False
+
+
+def _record_installed(tmp_path, *, revision, pinned=False):
+    inst = tmp_path / "models" / "myorg" / "llama-3.2-3b-tt"
+    inst.mkdir(parents=True, exist_ok=True)
+    run_sh = inst / "run.sh"
+    run_sh.write_text("#!/usr/bin/env bash\necho serving\n")
+    localdb.record("myorg/llama-3.2-3b-tt", {
+        "repo_id": "myorg/llama-3.2-3b-tt", "self_contained": True,
+        "install_dir": str(inst), "run_script": str(run_sh),
+        "python": str(inst / "venv/bin/python"), "revision": revision, "pinned": pinned,
+    })
+
+
+def _stub_serve_run(monkeypatch):
+    def _fake_run(argv, **kw):
+        class _R:
+            returncode = 0
+        return _R()
+    monkeypatch.setattr(cli.subprocess, "run", _fake_run)
+
+
+def test_serve_warns_when_newer_revision_available(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    _record_installed(tmp_path, revision="oldsha0000")
+    _stub_serve_run(monkeypatch)
+    monkeypatch.setattr(cli.hub, "latest_revision", lambda *a, **k: "newsha1111")
+
+    res = _runner.invoke(cli.app, ["serve", "myorg/llama-3.2-3b-tt", "--print"])
+    assert res.exit_code == 0, res.output
+    assert "There is an update to myorg/llama-3.2-3b-tt" in res.output
+    assert "tt-model pull myorg/llama-3.2-3b-tt --force" in res.output
+
+
+def test_serve_quiet_when_up_to_date(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    _record_installed(tmp_path, revision="samesha000")
+    _stub_serve_run(monkeypatch)
+    monkeypatch.setattr(cli.hub, "latest_revision", lambda *a, **k: "samesha000")
+
+    res = _runner.invoke(cli.app, ["serve", "myorg/llama-3.2-3b-tt", "--print"])
+    assert res.exit_code == 0, res.output
+    assert "There is an update" not in res.output
+
+
+def test_serve_no_update_check_when_pinned(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    _record_installed(tmp_path, revision="oldsha0000", pinned=True)
+    _stub_serve_run(monkeypatch)
+    # would report a newer sha, but a pinned install must not be nagged
+    monkeypatch.setattr(cli.hub, "latest_revision", lambda *a, **k: "newsha1111")
+
+    res = _runner.invoke(cli.app, ["serve", "myorg/llama-3.2-3b-tt", "--print"])
+    assert res.exit_code == 0, res.output
+    assert "There is an update" not in res.output
+
+
+def test_serve_no_update_check_when_local_only(monkeypatch, tmp_path):
+    _isolate(monkeypatch, tmp_path)
+    _record_installed(tmp_path, revision="oldsha0000")
+    _stub_serve_run(monkeypatch)
+    # --local-only must not touch the Hub at all
+    def _boom(*a, **k):
+        raise AssertionError("latest_revision must not be called with --local-only")
+    monkeypatch.setattr(cli.hub, "latest_revision", _boom)
+
+    res = _runner.invoke(cli.app, ["serve", "myorg/llama-3.2-3b-tt", "--print", "--local-only"])
+    assert res.exit_code == 0, res.output
+    assert "There is an update" not in res.output
 
 
 def test_serve_self_contained_print(monkeypatch, tmp_path):
