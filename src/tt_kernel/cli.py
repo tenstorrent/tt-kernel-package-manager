@@ -2077,10 +2077,16 @@ def login(
 
 
 # ------------------------------------------------------------------------- doctor
-def _warn_toolchain() -> None:
+def _warn_toolchain(python: Optional[str] = None) -> None:
     """Warn (never abort) about an inadequate surrounding toolchain. Called by run/pull
-    so a version skew is surfaced without blocking the user's action."""
-    for c in toolchain.check_toolchain().problems:
+    so a version skew is surfaced without blocking the user's action.
+
+    *python* is the interpreter that will actually serve (a selected instance's, when one is
+    resolved). Without it the warning describes tt-model's own venv, which for a pipx or
+    manager install is not where vLLM lives — the plugin then reads as missing on a host
+    that serves fine. `serve`'s hard error already checks the instance interpreter, so
+    omitting this made the warning contradict the error a few lines below it."""
+    for c in toolchain.check_toolchain(python).problems:
         typer.secho(f"  ! {c.name}: {c.message}", fg=typer.colors.YELLOW)
 
 
@@ -2426,6 +2432,10 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
         )
 
     inst_python, activation_env, inst_label = _serve_activation(entry, instance_override=instance)
+    # Warn only now: before this line the interpreter that will serve is unknown, and the
+    # check aimed at tt-model's own venv reported a missing plugin for instances that have
+    # one. Same interpreter the hard error below uses, so the two cannot disagree.
+    _warn_toolchain(inst_python)
     # Anything the user typed after the bundle id goes to vLLM, AFTER the bundle's own
     # command so a user --port/--host wins over the bundle default (argparse last-wins).
     argv = runtime.vllm_serve_argv(launch.command, python=inst_python) + list(extra_args or [])
@@ -2519,7 +2529,7 @@ def serve(
                 _serve_self_contained(entry, print_only=print_only, extra_args=extra_args)
                 return
 
-    _warn_toolchain()  # host-provisioned path: the surrounding tt-metal/vLLM versions do matter here
+    # (_serve_vllm warns once it knows which instance's interpreter will serve.)
     _serve_vllm(repo_id, revision, print_only=print_only, local_only=local_only,
                 arch=arch, bundles_dir=bundles_dir, do_health=health_check,
                 force=force, instance=instance, extra_args=extra_args)
