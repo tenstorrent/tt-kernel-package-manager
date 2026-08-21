@@ -17,7 +17,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from tt_kernel import cli, localdb, start, toolchain
+from tt_kernel import cli, console, localdb, start, toolchain
 
 runner = CliRunner()
 CLI = [sys.executable, "-m", "tt_kernel.cli"]
@@ -204,3 +204,93 @@ class TestDidYouMean:
         names = {c.__module__ for c in cli._USAGE_ERRORS}
         assert any("typer" in n for n in names), names
         assert any(n.startswith("click") for n in names), names
+
+
+# ── `tt-model start` with no model named ─────────────────────────────────────
+class TestMenu:
+    @pytest.mark.parametrize("keys,expected", [
+        (["2"], 1),
+        (["1"], 0),
+        ([""], 0),                      # bare Enter takes the default
+        (["q"], None),                  # declining is not an error
+        (["9", "abc", "2"], 1),         # re-prompts, does not crash or take a default
+    ])
+    def test_selection(self, monkeypatch, keys, expected):
+        it = iter(keys)
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(it))
+        assert console.choose("Serve", ["a", "b"]) == expected
+
+    def test_eof_declines_rather_than_looping(self, monkeypatch):
+        def boom(prompt=""):
+            raise EOFError
+        monkeypatch.setattr("builtins.input", boom)
+        assert console.choose("Serve", ["a", "b"]) is None
+
+
+class TestPickModel:
+    def _entries(self, monkeypatch, entries):
+        monkeypatch.setattr(start.localdb, "all_entries", lambda: entries)
+
+    def test_no_model_and_nothing_installed_explains_instead_of_erroring(self, monkeypatch):
+        """`tt-model start` used to answer "Missing argument 'model'." — the one response a
+        guided command must not give."""
+        self._entries(monkeypatch, [])
+        res = runner.invoke(cli.app, ["start"])
+        assert res.exit_code == 2
+        assert "Nothing is installed yet" in res.output
+        assert "tt-model search --catalog" in res.output
+        assert "Missing argument" not in res.output
+
+    def test_a_single_installed_bundle_is_used_without_asking(self, monkeypatch):
+        self._entries(monkeypatch, [
+            {"repo_id": "org/only", "bundle_path": "/tmp/x", "backend": "vllm"}])
+        monkeypatch.setattr(cli.console, "choose", _must_not_be_called)
+        repo, note = cli._pick_model(interactive=True)
+        assert repo == "org/only"
+        assert "only installed" in note
+
+    def test_several_installed_non_interactive_lists_them(self, monkeypatch):
+        """No prompt is possible, so name the exact commands rather than failing vaguely."""
+        self._entries(monkeypatch, [
+            {"repo_id": "org/a", "bundle_path": "/tmp/x"},
+            {"repo_id": "org/b", "bundle_path": "/tmp/x"}])
+        res = runner.invoke(cli.app, ["start", "--yes"])
+        assert res.exit_code == 2
+        assert "tt-model start org/a" in res.output
+        assert "tt-model start org/b" in res.output
+
+    def test_several_installed_interactive_prompts(self, monkeypatch):
+        self._entries(monkeypatch, [
+            {"repo_id": "org/a", "bundle_path": "/tmp/x"},
+            {"repo_id": "org/b", "bundle_path": "/tmp/x"}])
+        monkeypatch.setattr(cli.console, "choose", lambda *a, **k: 1)
+        repo, note = cli._pick_model(interactive=True)
+        assert repo == "org/b"
+
+    def test_declining_the_menu_exits_without_starting_anything(self, monkeypatch):
+        self._entries(monkeypatch, [
+            {"repo_id": "org/a", "bundle_path": "/tmp/x"},
+            {"repo_id": "org/b", "bundle_path": "/tmp/x"}])
+        monkeypatch.setattr(cli.console, "choose", lambda *a, **k: None)
+        with pytest.raises(typer.Exit):
+            cli._pick_model(interactive=True)
+
+    def test_entries_without_a_bundle_path_are_not_offered(self, monkeypatch):
+        """A recorded-but-not-materialised entry cannot be served, so offering it would
+        send the user into a failure."""
+        self._entries(monkeypatch, [
+            {"repo_id": "org/ghost"},                          # no bundle_path
+            {"repo_id": "org/real", "bundle_path": "/tmp/x"}])
+        ids = [c.repo_id for c in start.installed_choices()]
+        assert ids == ["org/real"]
+
+    def test_labels_carry_enough_to_choose_between(self, monkeypatch):
+        self._entries(monkeypatch, [
+            {"repo_id": "org/a", "bundle_path": "/x", "backend": "vllm", "arch": "blackhole"}])
+        assert start.installed_choices()[0].label == "org/a  (vllm · blackhole)"
+
+
+def test_model_argument_is_optional():
+    """The signature is the contract: a required argument makes the guided path impossible."""
+    res = runner.invoke(cli.app, ["start", "--help"])
+    assert "[{model}]" in res.output or "Omit to pick" in res.output

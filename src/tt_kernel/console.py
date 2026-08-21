@@ -617,3 +617,31 @@ def stepper_line_for(title):
             p["status"] = "active"
             break
     return stepper_line()
+
+
+def choose(prompt_text, options, default=1):
+    """A numbered menu. Returns the chosen index (0-based), or None if declined.
+
+    A plain numbered list read with input(), not a cursor-driven picker: it degrades to
+    readable text on a dumb terminal, works over ssh, and needs no extra dependency. The
+    caller is responsible for only calling this when stdin is interactive — a menu on a
+    piped stdin reads EOF and silently takes the default.
+    """
+    if activity.running():
+        activity.stop()
+    for i, label in enumerate(options, 1):
+        console.print(f"  [accent.bold]{i}[/accent.bold]  {label}")
+    console.print()
+    while True:
+        try:
+            raw = input(f"{prompt_text} [1-{len(options)}, or q to quit] ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print()
+            return None
+        if raw == "":
+            return default - 1
+        if raw.lower() in ("q", "quit", "n", "no"):
+            return None
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return int(raw) - 1
+        console.print(f"[muted]Enter a number from 1 to {len(options)}, or q.[/muted]")

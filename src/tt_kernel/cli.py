@@ -293,7 +293,9 @@ def _is_private_or_unknown(repo_id: str) -> bool:
 @app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True}, rich_help_panel="Get started")
 def start(
     ctx: typer.Context,
-    model: str = typer.Argument(..., help="Model or bundle id to serve."),
+    model: Optional[str] = typer.Argument(
+        None, help="Model or bundle id to serve. Omit to pick from what is installed."
+    ),
     token: Optional[str] = typer.Option(None, "--token", help="Hugging Face token (else $HF_TOKEN, the HF token store, or a prompt)."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Never prompt; fail instead if something is missing."),
     port: int = typer.Option(8000, "--port", help="Port to serve on."),
@@ -307,6 +309,14 @@ def start(
     Walks account -> environment -> model -> serve, stopping at the first step that cannot succeed rather than failing later with less context. Everything it does is available as an individual command; this is the path that sequences them.
     """
     extra_args = list(ctx.args)
+
+    # No model given: offer what is installed rather than erroring. A guided command that
+    # answers "Missing argument 'model'." has failed at the one thing it exists to do.
+    picked_note = None
+    if not model:
+        model, picked_note = _pick_model(
+            interactive=not yes and start_mod.stdin_is_interactive())
+
     console.register_phases(start_mod.PHASES)
     console.console.print(console.steps_panel_lines(
         "tt-model", [(t, start_mod.PHASE_DETAIL[t]) for t in start_mod.PHASES]))
@@ -350,7 +360,7 @@ def start(
     # ---- 3. Model.
     with console.phase("Model"):
         repo_id, how = start_mod.resolve_bundle(model)
-        console.note(f"{repo_id} — {how}", marker="○", style="muted")
+        console.note(f"{repo_id} — {picked_note or how}", marker="○", style="muted")
         if not start_mod.is_installed(repo_id):
             if local_only:
                 raise _err(f"No installed bundle for {repo_id} (and --local-only forbids a pull).")
@@ -364,6 +374,46 @@ def start(
     _serve_vllm(repo_id, None, print_only=print_only, local_only=True, arch=arch,
                 bundles_dir=None, do_health=False, instance=instance,
                 extra_args=(["--port", str(port)] if port != 8000 else []) + extra_args)
+
+
+def _pick_model(*, interactive: bool) -> "tuple[str, str]":
+    """Resolve which model to serve when the user named none.
+
+    One installed bundle is offered as the default; several get a numbered menu; none gets
+    an explanation of how to find one. Non-interactive callers never see a prompt — they
+    get the single obvious candidate, or a clear failure naming what is available.
+    """
+    choices = start_mod.installed_choices()
+
+    if not choices:
+        raise _fail_panel("No model to start", [
+            "[error]Nothing is installed yet, and no model was named.[/error]",
+            "",
+            "[info]Try:[/info]",
+            "  tt-model search --catalog",
+            "[muted]    browse bundles published for tt-model[/muted]",
+            "  tt-model start <namespace>/<model>",
+            "[muted]    pull and serve one directly[/muted]",
+        ], code=2)
+
+    if len(choices) == 1:
+        # Nothing to choose between, so don't make the user choose. The provenance is
+        # returned rather than printed here: this runs before the roadmap, and a note above
+        # the panel reads like output from a previous command.
+        return choices[0].repo_id, "the only installed bundle"
+
+    if not interactive:
+        raise _fail_panel("No model to start", [
+            "[error]No model was named, and several are installed.[/error]",
+            "",
+            "[info]Pick one:[/info]",
+        ] + [f"[muted]  tt-model start {c.repo_id}[/muted]" for c in choices], code=2)
+
+    console.console.print("[bold accent]Which model?[/bold accent]")
+    index = console.choose("Serve", [c.label for c in choices])
+    if index is None:
+        raise typer.Exit(code=1)
+    return choices[index].repo_id, "chosen from the installed bundles"
 
 
 def _start_blocked(blockers: List[str], env) -> "typer.Exit":

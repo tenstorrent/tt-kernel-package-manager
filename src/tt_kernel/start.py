@@ -143,3 +143,30 @@ def resolve_bundle(model: str) -> Tuple[str, str]:
 def is_installed(repo_id: str) -> bool:
     entry = localdb.get(repo_id)
     return bool(entry and entry.get("bundle_path"))
+
+
+# ------------------------------------------------------------------- model discovery
+@dataclass
+class Choice:
+    repo_id: str
+    label: str
+
+
+def installed_choices() -> List[Choice]:
+    """Installed bundles, newest-looking first, as menu entries.
+
+    `tt-model start` with no argument used to be a bare "Missing argument 'model'." — which
+    is the one thing a guided command should not do. If there is something to serve, offer
+    it; the user should not have to run `list` to find out what they already have.
+    """
+    out: List[Choice] = []
+    for e in localdb.all_entries():
+        repo_id = e.get("repo_id")
+        if not repo_id or not e.get("bundle_path"):
+            continue
+        bits = [b for b in (e.get("backend"), e.get("arch")) if b]
+        if e.get("self_contained"):
+            bits.append("self-contained")
+        suffix = f"  ({' · '.join(bits)})" if bits else ""
+        out.append(Choice(repo_id=repo_id, label=f"{repo_id}{suffix}"))
+    return sorted(out, key=lambda c: c.repo_id)
