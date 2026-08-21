@@ -530,19 +530,42 @@ def skip_phase(title, why=""):
         pinned.repaint()
 
 
-def _body_print(renderable):
-    """Print into the phase body without landing on the live activity row.
+def _render_lines(renderable, width):
+    """Render to ANSI text at a fixed width, matching the live console's colour support.
 
-    The activity ticker leaves the cursor mid-row (no trailing newline), so any
-    body print must erase that row first; the ticker repaints it on its next
-    tick. Everything shares `_lock`, so the two writers can't interleave
-    mid-escape-sequence.
+    A private Console with a StringIO file, so this works inside step()'s capture without
+    fighting it for sys.stdout.
     """
+    buf = io.StringIO()
+    tmp = Console(theme=THEME, highlight=False, soft_wrap=False, width=width, file=buf,
+                  force_terminal=True if console.is_terminal else None,
+                  no_color=not console.is_terminal)
+    tmp.print(renderable)
+    return buf.getvalue().rstrip("\n").split("\n")
+
+
+def _body_print(renderable):
+    """Print into the phase body without landing on the live activity row, and without
+    trailing whitespace.
+
+    Two things, both easy to get wrong separately:
+
+    1. The activity ticker leaves the cursor mid-row (no trailing newline), so any body
+       print must erase that row first; the ticker repaints it on its next tick.
+       Everything shares `_lock`, so the two writers can't interleave mid-escape-sequence.
+    2. `Padding` fills each line to the render width — which is what keeps a wrapped cell's
+       indent, but also meant every row trailed spaces out to the terminal edge. At 160
+       columns that is ~80 trailing spaces per line in the user's copy buffer. So render at
+       a fixed width, then rstrip each line: the indent survives, the padding does not.
+    """
+    lines = _render_lines(renderable, rule_width())
     with _lock:
         if activity.running() and _isatty():
             _real_console.file.write("\r\033[2K")
             _real_console.file.flush()
-        console.print(renderable)
+        # console.file, not _real_console: inside a captured step() this must stay captured.
+        console.file.write("\n".join(line.rstrip() for line in lines) + "\n")
+        console.file.flush()
 
 
 def note(text, marker="○", style="muted"):
@@ -772,7 +795,9 @@ def print_table(table, indent=2):
     Width-capped like every other piece of furniture, so a wide terminal does not stretch
     the rows (and their trailing whitespace) across the screen.
     """
-    console.print(Padding(table, (0, 0, 0, indent)), width=rule_width())
+    # Through _body_print, not console.print: that is where the width cap and the
+    # trailing-whitespace rstrip live, and a table is the widest thing in a phase body.
+    _body_print(Padding(table, (0, 0, 0, indent)))
 
 
 def hint(text, indent=4):
