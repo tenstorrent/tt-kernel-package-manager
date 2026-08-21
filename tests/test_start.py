@@ -565,3 +565,13 @@ class TestFlagsAreNotModelIds:
         monkeypatch.setattr(cli, "_serve_vllm", lambda *a, **k: None)
         res = runner.invoke(cli.app, ["start", "org/m", "--yes", "--force", "--print"])
         assert seen.get("force") is True, (seen, res.output)
+
+
+def test_is_installed_requires_the_folder_not_just_the_index(monkeypatch, tmp_path):
+    """A stale index entry made start skip the pull and fail at serve three steps later,
+    where _ensure_vllm_pulled would have re-pulled it."""
+    gone = tmp_path / "not-there"
+    monkeypatch.setattr(start.localdb, "get", lambda r: {"bundle_path": str(gone)})
+    assert start.is_installed("org/m") is False
+    gone.mkdir()
+    assert start.is_installed("org/m") is True

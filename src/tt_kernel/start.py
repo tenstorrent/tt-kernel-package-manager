@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from . import auth, console, hub, localdb, metal, runtime, toolchain
@@ -146,8 +147,15 @@ def resolve_bundle(model: str) -> Tuple[str, str]:
 
 
 def is_installed(repo_id: str) -> bool:
+    """Whether the bundle is on disk — not merely recorded in the index.
+
+    An index entry whose folder has been deleted made `start` skip the pull and fail three
+    steps later at serve, while `_ensure_vllm_pulled` (which does check) would simply have
+    re-pulled it. Trust the filesystem, not the bookkeeping.
+    """
     entry = localdb.get(repo_id)
-    return bool(entry and entry.get("bundle_path"))
+    path = entry.get("bundle_path") if entry else None
+    return bool(path and Path(path).is_dir())
 
 
 # ------------------------------------------------------------------- model discovery

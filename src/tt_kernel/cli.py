@@ -225,17 +225,29 @@ def _hub(op, repo_id: str, *, what: str, consequence: Optional[str] = None):
         raise _fail_card(what, hub.classify_hub_error(exc, repo_id), consequence=consequence)
 
 
+def _routine(msg: str, fg: str = typer.colors.GREEN) -> None:
+    """A confirmation worth printing on its own, but not inside a phase.
+
+    Within a phase the collapsed `✓ Phase k/N` line IS the confirmation, so these fold;
+    `--verbose` brings them back, and a standalone `pull`/`info` (no phase) still prints
+    them. Failures and actionable warnings must never route through here.
+    """
+    if console.show_detail():
+        typer.secho(msg, fg=fg)
+
+
 def _print_report(report: CompatibilityReport) -> None:
     if report.compatible:
-        typer.secho("✓ compatible with the local environment", fg=typer.colors.GREEN)
+        _routine("✓ compatible with the local environment")
         return
-    typer.secho("Compatibility issues:", fg=typer.colors.YELLOW)
+    # Never folded: an incompatibility is why the user is watching, and the next line the
+    # install prints is a refusal that only makes sense next to it.
+    console.note("compatibility issues", marker="!", style="warning")
     for i in report.issues:
+        style = "error" if i.fatal else "warning"
         tag = "FATAL" if i.fatal else "warn"
-        color = typer.colors.RED if i.fatal else typer.colors.YELLOW
-        typer.secho(
-            f"  [{tag}] {i.field}: bundle={i.expected!r} local={i.detected!r}", fg=color
-        )
+        console.note(f"[{tag}] {i.field}: bundle={i.expected!r} local={i.detected!r}",
+                     marker=" ", style=style)
 
 
 def _ensure_repo(repo_id: str, private: Optional[bool], *, publish: bool = False) -> None:
@@ -1119,7 +1131,7 @@ def _push_vllm(
             typer.secho(f"  (could not write tags: {exc})", fg=typer.colors.YELLOW)
 
     typer.secho(f"✓ Pushed vLLM bundle {repo_id}", fg=typer.colors.GREEN)
-    typer.secho(f"  Serve it:  tt-model serve {repo_id}", fg=typer.colors.CYAN)
+    _routine(f"  Serve it:  tt-model serve {repo_id}", fg=typer.colors.CYAN)
 
 
 # -------------------------------------------------------------------------- package
@@ -1616,7 +1628,7 @@ def pull(
                  weights_path=weights_path, last_error=None)
 
     # Ready-to-run guidance.
-    typer.secho(f"✓ Installed {repo_id}", fg=typer.colors.GREEN)
+    _routine(f"✓ Installed {repo_id}")
     if manifest.runner and runner_ready and weights_path is not None:
         typer.echo("\nRun it:")
         typer.secho("  " + runtime.serve_command(manifest.runner.spec, weights_path),
@@ -1724,8 +1736,8 @@ def _select_instance(manifest, *, arch, instance_override, force):
         else:
             chosen, v = result.chosen, next(c.versions for c in result.candidates
                                             if c.instance is result.chosen)
-        typer.secho(f"  tt-metal instance: {chosen.name} "
-                    f"(ttnn={v.ttnn}, vllm={v.vllm}, plugin={v.plugin})", fg=typer.colors.CYAN)
+        _routine(f"  tt-metal instance: {chosen.name} "
+                 f"(ttnn={v.ttnn}, vllm={v.vllm}, plugin={v.plugin})", fg=typer.colors.CYAN)
 
     # A probe that fails (missing .so, NFS timeout — all swallowed) yields None; do NOT let it
     # clobber the really-installed version, or the range gate silently becomes a no-op and an
@@ -1895,16 +1907,16 @@ def _install_vllm_bundle(
                 shutil.rmtree(dest)
             dest.mkdir(parents=True, exist_ok=True)
         bundles.write_vllm_metadata(dest, bundles.render_vllm_metadata(manifest))
-        typer.secho(f"✓ vLLM bundle (rendered vllm_metadata.json) -> {dest}", fg=typer.colors.GREEN)
+        _routine(f"✓ vLLM bundle (rendered vllm_metadata.json) -> {dest}")
     else:
         # Legacy: ship the author-written vllm_metadata.json verbatim.
         if not (staged / bundles.VLLM_METADATA_NAME).is_file():
             raise _err(f"Bundle is missing its folder {subdir}/{bundles.VLLM_METADATA_NAME}.")
         dest = bundles.install_bundle(staged, bdir, key)
-        typer.secho(f"✓ vLLM bundle -> {dest}", fg=typer.colors.GREEN)
+        _routine(f"✓ vLLM bundle -> {dest}")
 
     md = bundles.read_vllm_metadata(dest)
-    typer.secho(f"  registers {md.arch} -> {md.main_class}", fg=typer.colors.CYAN)
+    _routine(f"  registers {md.arch} -> {md.main_class}", fg=typer.colors.CYAN)
 
     weights_path = None
     if with_weights and manifest.weights:
@@ -1920,8 +1932,8 @@ def _install_vllm_bundle(
     _record_pull(repo_id, manifest, out_root="", runner_installed=False,
                  weights_path=weights_path, last_error=None, bundle_path=str(dest),
                  instance=selected)
-    typer.secho(f"✓ Installed {repo_id}", fg=typer.colors.GREEN)
-    typer.secho(f"  Serve it:  tt-model serve {repo_id}", fg=typer.colors.CYAN)
+    _routine(f"✓ Installed {repo_id}")
+    _routine(f"  Serve it:  tt-model serve {repo_id}", fg=typer.colors.CYAN)
 
 
 # --------------------------------------------------------------------- instances
