@@ -275,3 +275,63 @@ def test_no_passthrough_leaves_the_bundle_command_alone(monkeypatch, tmp_path):
     res = runner.invoke(cli.app, ["serve", "org/m", "--print", "--local-only"])
     assert res.exit_code == 0, res.output
     assert "http://localhost:8100" in res.output
+
+
+# ----------------------------------------- the serving adapter must exist (preflight)
+class TestAdapterRoot:
+    def test_extracts_the_top_level_package(self):
+        assert runtime.adapter_root(
+            "models.autoports.qwen_qwen3_32b.tt.generator_vllm:Qwen3ForCausalLM") == "models"
+
+    def test_handles_a_bare_module(self):
+        assert runtime.adapter_root("mypkg:Cls") == "mypkg"
+
+    def test_empty_is_none(self):
+        assert runtime.adapter_root("") is None
+        assert runtime.adapter_root(None) is None
+
+
+class TestModuleImportable:
+    def test_true_for_a_stdlib_module(self):
+        assert runtime.module_importable("json") is True
+
+    def test_false_for_a_missing_module(self):
+        assert runtime.module_importable("definitely_not_a_module_xyz") is False
+
+    def test_fails_open_when_the_interpreter_cannot_be_probed(self):
+        """An unanswerable check must not become a blocker — that would refuse to serve a
+        model that would have worked."""
+        assert runtime.module_importable("json", python="/nonexistent/python") is True
+
+
+def test_serve_blocks_when_the_adapter_tree_is_absent(monkeypatch, tmp_path):
+    """The ttnn PyPI wheel ships no models/ tree, so a fully green toolchain still cannot
+    serve a bundle whose main_class lives under models.*. Without this the failure arrives
+    as an ImportError from inside vLLM, after startup has already burned ~18 seconds."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    src = _make_bundle_folder(
+        tmp_path, arch="Qwen3ForCausalLM",
+        main_class="models.autoports.qwen_qwen3_32b.tt.generator_vllm:Qwen3ForCausalLM",
+        launch={"default": {"command": ["python3", "server.py", "--port", "8123"], "env": {}}},
+    )
+    dest = bundles.install_bundle(src, tmp_path / "bundles", "org__m")
+    _seed_vllm_installed("org/m", dest)
+    monkeypatch.setattr(runtime, "vllm_available", lambda python=None: True)
+    res = runner.invoke(cli.app, ["serve", "org/m", "--local-only"])
+    assert res.exit_code == 1
+    assert "adapter is not installed" in res.output
+    assert "models is missing" in res.output
+
+
+def test_serve_does_not_block_when_the_adapter_is_present(monkeypatch, tmp_path):
+    """Guard against the check refusing a bundle that would have served."""
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    src = _make_bundle_folder(
+        tmp_path, arch="X", main_class="json:Whatever",
+        launch={"default": {"command": ["python3", "server.py", "--port", "8124"], "env": {}}},
+    )
+    dest = bundles.install_bundle(src, tmp_path / "bundles", "org__ok")
+    _seed_vllm_installed("org/ok", dest)
+    monkeypatch.setattr(runtime, "vllm_available", lambda python=None: True)
+    res = runner.invoke(cli.app, ["serve", "org/ok", "--local-only", "--print"])
+    assert "adapter is not installed" not in res.output

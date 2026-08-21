@@ -374,3 +374,102 @@ def pip_error_line(output: str) -> str:
             if marker in ln:
                 return ln[:160]
     return lines[-1][:160] if lines else ""
+
+
+# --------------------------------------------------------- "it's in the other venv"
+def _candidate_pythons(exclude: Optional[str] = None) -> List[str]:
+    """Interpreters on this box worth probing for ttnn, cheapest-first.
+
+    Deliberately wider than ``scan_checkouts``: ttnn installs perfectly well as a plain
+    PyPI wheel, so the venv that has it may be an ordinary ``.venv`` next to the repo with
+    no tt-metal checkout anywhere near it.
+    """
+    seen, out = set(), []
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    candidates = [
+        os.environ.get("VIRTUAL_ENV"),
+        str(repo_root / ".venv"),
+        str(repo_root / "venv"),
+        os.path.expanduser("~/.venv"),
+        os.path.expanduser("~/.tenstorrent-venv"),
+    ]
+    # Identity is the venv PATH, never its symlink target: every venv's bin/python3 is a
+    # symlink to the same base interpreter, so resolving them collapses .venv,
+    # ~/.tenstorrent-venv and the system python into one entry — and makes the interpreter
+    # we were asked to exclude match all of them.
+    excluded = os.path.abspath(exclude) if exclude else None
+
+    def _add(path):
+        py = Path(path)
+        if not py.is_file():
+            return
+        abs_path = os.path.abspath(str(py))
+        if abs_path in seen or abs_path == excluded:
+            return
+        seen.add(abs_path)
+        out.append(abs_path)
+
+    for root in candidates:
+        if root:
+            _add(Path(root) / "bin" / "python3")
+    for _home, py in instances.scan_checkouts():
+        if py:
+            _add(py)
+    return out
+
+
+def ttnn_elsewhere(exclude: Optional[str] = None) -> List[Tuple[str, Optional[str]]]:
+    """``(python, version)`` for other interpreters here that CAN import ttnn.
+
+    Exists because of a real dead end: ttnn was pip-installed into the repo's ``.venv``,
+    which flipped `doctor` green there — but the shell had a different venv active, so the
+    very next `start` still reported "tt-metal not found". Everything needed to say
+    "it is installed, just not here" was already on disk; nothing said it.
+    """
+    found = []
+    for py in _candidate_pythons(exclude):
+        if can_import(py, "ttnn"):
+            found.append((py, _dist_version(py, "ttnn")))
+    return found
+
+
+def _dist_version(python: str, dist: str) -> Optional[str]:
+    try:
+        out = subprocess.run(
+            [python, "-c",
+             f"import importlib.metadata as m; print(m.version({dist!r}))"],
+            capture_output=True, text=True, timeout=60)
+        if out.returncode == 0:
+            return out.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def ttnn_remedy(python: Optional[str] = None) -> List[Tuple[str, str]]:
+    """``(command, why)`` steps that actually fix a missing ttnn, most direct first.
+
+    The PyPI wheel is the whole fix in the common case: it carries ``tt_metal/hw/inc`` so
+    ``metal.detect_tt_metal_home()`` derives TT_METAL_HOME by walking up from
+    ``find_spec("ttnn")``, and it ships ``_ttnncpp.so``, so nothing has to be exported and
+    no source build is needed.
+    """
+    import sys as _sys
+
+    exe = python or _sys.executable
+    steps = [(f'pip install "{TTNN_PYPI_SPEC}"',
+              f"into {_short(exe)} — ~250MB from PyPI, no source build and no "
+              "TT_METAL_HOME to export")]
+    for other, version in ttnn_elsewhere(exclude=exe):
+        # Name the venv to activate, not the absolute interpreter path: the full path wraps
+        # on a normal terminal, and a command that wraps mid-flag cannot be pasted.
+        venv = Path(other).parent.parent
+        steps.append((f"source {_short(str(venv / 'bin' / 'activate'))}",
+                      f"ttnn {version or '?'} is already installed there — this shell has a "
+                      "different interpreter active"))
+    return steps
+
+
+def _short(path: str) -> str:
+    home = os.path.expanduser("~")
+    return path.replace(home, "~", 1) if path.startswith(home) else path

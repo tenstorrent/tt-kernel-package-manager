@@ -100,7 +100,7 @@ class Environment:
         out = []
         for c in self.report.components:
             if not c.adequate:
-                out.append(f"{c.name} is not adequate: {c.message}")
+                out.append(f"{c.name} is not available in this environment")
         if not self.port_free:
             out.append(f"port {self.port} is already in use")
         return out

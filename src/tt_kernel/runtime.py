@@ -347,3 +347,38 @@ def port_of(endpoint: str) -> Optional[int]:
         return int(endpoint.rsplit(":", 1)[1].split("/")[0])
     except (IndexError, ValueError):
         return None
+
+
+def module_importable(module: str, python: Optional[str] = None) -> bool:
+    """Whether ``module`` can be found by the interpreter that will run the server.
+
+    ``find_spec``, not ``import``: the target modules pull in the whole device stack, and
+    the question here is only whether the code is present.
+    """
+    import subprocess as sp
+    import sys as _sys
+
+    code = (
+        "import importlib.util as u, sys\n"
+        f"sys.exit(0 if u.find_spec({module!r}) else 1)\n"
+    )
+    try:
+        return sp.run([python or _sys.executable, "-c", code],
+                      capture_output=True, timeout=120).returncode == 0
+    except (OSError, sp.SubprocessError):
+        return True  # cannot tell; do not invent a blocker
+
+
+def adapter_root(main_class: str) -> Optional[str]:
+    """The importable module root of a bundle's ``main_class``.
+
+    `vllm_metadata.json` names the serving adapter as
+    ``models.autoports.qwen_qwen3_32b.tt.generator_vllm:Qwen3ForCausalLM``. The top-level
+    package is what determines whether the adapter tree exists at all — a missing
+    ``models`` is a different (and much more common) problem than a missing leaf module,
+    and it is the one the ttnn PyPI wheel causes, since that wheel ships no models/ tree.
+    """
+    if not main_class:
+        return None
+    module = main_class.split(":", 1)[0].strip()
+    return module.split(".", 1)[0] if module else None

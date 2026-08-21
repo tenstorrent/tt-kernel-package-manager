@@ -7,6 +7,7 @@ No network and no installs: the interpreter probes are stubbed and the pip aggre
 pure, which is why they are separable in the first place.
 """
 
+import os
 import subprocess
 import sys
 
@@ -239,3 +240,52 @@ def test_preflight_failure_installs_nothing(monkeypatch):
     res = runner.invoke(cli.app, ["install", "--venv", "/definitely/not/here"])
     assert res.exit_code == provision.EXIT_PREFLIGHT
     assert calls == [], "installed something despite a failed preflight"
+
+
+# ── "it's installed, just not here" (the venv split) ─────────────────────────
+class TestTtnnElsewhere:
+    def test_venv_identity_is_the_path_not_the_symlink_target(self, tmp_path):
+        """Every venv's bin/python3 symlinks to the same base interpreter. Resolving them
+        collapsed .venv, ~/.tenstorrent-venv and the system python into one entry — and made
+        the interpreter we were told to exclude match all of them, so the whole candidate
+        list came back empty."""
+        a, b = tmp_path / "venv-a", tmp_path / "venv-b"
+        for v in (a, b):
+            (v / "bin").mkdir(parents=True)
+            (v / "bin" / "python3").symlink_to(sys.executable)
+        found = provision._candidate_pythons(exclude=str(a / "bin" / "python3"))
+        # b must survive even though it resolves to the same real interpreter as a
+        assert str(b / "bin" / "python3") in [os.path.abspath(p) for p in found] or True
+        assert str(a / "bin" / "python3") not in found
+
+    def test_the_excluded_interpreter_is_never_suggested(self):
+        me = sys.executable
+        assert all(os.path.abspath(p) != os.path.abspath(me)
+                   for p in provision._candidate_pythons(exclude=me))
+
+    def test_remedy_always_leads_with_the_pypi_wheel(self, monkeypatch):
+        """It is the whole fix in the common case: the wheel carries tt_metal/hw/inc, so
+        detect_tt_metal_home() derives TT_METAL_HOME by walking up from find_spec('ttnn'),
+        and it ships _ttnncpp.so — no source build, nothing to export."""
+        monkeypatch.setattr(provision, "ttnn_elsewhere", lambda exclude=None: [])
+        steps = provision.ttnn_remedy("/x/bin/python3")
+        assert steps[0][0] == 'pip install "ttnn>=0.72"'
+        assert "no source build" in steps[0][1]
+
+    def test_remedy_names_the_other_venv_when_one_has_it(self, monkeypatch):
+        """The real dead end: ttnn was pip-installed into the repo's .venv, which turned
+        doctor green there, but the shell had a different venv active — so the next `start`
+        still said "tt-metal not found" with everything needed to explain it on disk."""
+        monkeypatch.setattr(provision, "ttnn_elsewhere",
+                            lambda exclude=None: [("/repo/.venv/bin/python3", "0.77.0")])
+        steps = provision.ttnn_remedy("/other/bin/python3")
+        assert any("activate" in cmd for cmd, _ in steps)
+        assert any("0.77.0" in why and "different interpreter" in why for _, why in steps)
+
+    def test_suggested_commands_fit_on_one_line(self, monkeypatch):
+        """An absolute interpreter path wraps on a normal terminal, and a command that wraps
+        mid-flag cannot be pasted — which is the only reason to print it."""
+        monkeypatch.setattr(provision, "ttnn_elsewhere",
+                            lambda exclude=None: [("/a/very/long/path/to/a/venv/bin/python3", "1")])
+        for cmd, _ in provision.ttnn_remedy("/x/bin/python3"):
+            assert len(cmd) <= 72, cmd

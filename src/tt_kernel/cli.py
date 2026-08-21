@@ -417,14 +417,30 @@ def _pick_model(*, interactive: bool) -> "tuple[str, str]":
 
 
 def _start_blocked(blockers: List[str], env) -> "typer.Exit":
-    """Stop at Validate rather than failing later with less context."""
+    """Stop at Validate, naming the step that actually fixes each blocker.
+
+    "tt-model install" is a pointer, not an instruction — and for a missing ttnn it is not
+    even the shortest path. Each blocker gets the concrete command, because the whole point
+    of stopping early is to hand back something the user can run.
+    """
     lines = [f"[error]{b}[/error]" for b in blockers]
-    lines += ["", "[warning]Nothing was pulled or started.[/warning]", "", "[info]Try:[/info]"]
+    lines += ["", "[warning]Nothing was pulled or started.[/warning]", ""]
+
+    steps: List[tuple] = []
+    if any("tt-metal" in b for b in blockers):
+        steps += provision.ttnn_remedy()
+    if any("vllm" in b for b in blockers):
+        steps.append(("tt-model install",
+                      "clones the Tenstorrent vLLM fork and installs it + the TT plugin"))
     if any("port" in b for b in blockers):
-        lines.append(f"[muted]  tt-model start <model> --port <n>[/muted]")
-    if any(c.name in b for b in blockers for c in env.report.components):
-        lines.append("[muted]  tt-model install[/muted]")
-    lines.append("[muted]  tt-model doctor[/muted]")
+        steps.append((f"tt-model start --port <n>",
+                      f"serve somewhere other than {env.port}"))
+        steps.append((f"lsof -i :{env.port}", "see what is holding it"))
+
+    lines.append("[info]" + ("Try:" if len(steps) < 2 else "Fix it with:") + "[/info]")
+    for cmd, why in steps:
+        lines += [f"  {cmd}", f"[muted]    {why}[/muted]"]
+    lines += ["", "[muted]  tt-model doctor          # re-check when you are done[/muted]"]
     return _fail_panel("Validate", lines, code=1)
 
 # ------------------------------------------------------------------------- install
@@ -2234,7 +2250,8 @@ def _serve_activation(entry: dict, *, instance_override: Optional[str]):
     return None, {}, None
 
 
-def _serve_preflight(endpoint: str, inst_python: Optional[str]) -> None:
+def _serve_preflight(endpoint: str, inst_python: Optional[str],
+                     main_class: Optional[str] = None) -> None:
     """Everything knowable before vLLM is launched, checked before anything is promised.
 
     Two conditions, both of which previously surfaced only after the CLI had already
@@ -2254,7 +2271,24 @@ def _serve_preflight(endpoint: str, inst_python: Optional[str]) -> None:
                         f"{'tt-model serve <id> --print':<32}# emit the command for another box"],
         }, consequence="vLLM was not started.")
 
-    # 2. Is the port we are about to claim actually free? One syscall, versus 18 seconds of
+    # 2. Is the model's serving adapter actually present? The bundle names a class like
+    # models.autoports.<model>.tt.generator_vllm:Cls, and the ttnn PyPI wheel ships no
+    # models/ tree at all — so a perfectly healthy-looking toolchain still cannot serve.
+    # Without this the failure arrives as an ImportError from inside vLLM after startup.
+    root = runtime.adapter_root(main_class or "")
+    if root and not runtime.module_importable(root, inst_python):
+        where = inst_python or "this environment"
+        raise _fail_card("Preflight", {
+            "cause": f"the model's adapter is not installed ({root} is missing)",
+            "detail": f"This bundle serves through {main_class}, but {root!r} is not "
+                      f"importable in {_short_path(where)}. The ttnn PyPI wheel does not "
+                      "ship the models/ tree, so a green toolchain is not enough here.",
+            "evidence": "",
+            "actions": [f"{'tt-model info <id>':<34}# what this bundle needs",
+                        f"{'add the tt-metal models/ tree to PYTHONPATH':<34}"],
+        }, consequence="vLLM was not started.")
+
+    # 3. Is the port we are about to claim actually free? One syscall, versus 18 seconds of
     # startup followed by OSError: [Errno 98] from inside vLLM.
     port = runtime.port_of(endpoint)
     if port is not None and runtime.port_in_use(port):
@@ -2318,7 +2352,7 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
     # above the vLLM-importable check, so `serve` promised "OpenAI endpoint (once up):
     # http://localhost:8000" and then said it could not serve at all.
     if not print_only:
-        _serve_preflight(endpoint, inst_python)
+        _serve_preflight(endpoint, inst_python, main_class=md.main_class)
 
     via = f"{mkey}" + (f"; instance={inst_label}" if inst_label else "")
     typer.secho(f"[vLLM: {md.arch} via {via}; EXTRA_MODELS_DIR={extra_models_dir}]",
