@@ -564,3 +564,20 @@ def fmt_version(version, keep_local=False):
     if keep_local or "+" not in version:
         return version
     return version.split("+", 1)[0]
+
+
+def steps_panel_lines(title, phases):
+    """The upfront roadmap: what this run will do, before it starts doing it.
+
+    Numbers are right-aligned accent so the list reads as a sequence rather than a menu.
+    Shown once, so a long install is a known quantity from the first second.
+    """
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(justify="right", no_wrap=True)
+    grid.add_column(no_wrap=True)
+    grid.add_column(style="muted", overflow="fold")
+    for i, (name, detail) in enumerate(phases, 1):
+        grid.add_row(f"[accent.bold]{i}[/accent.bold]", f"[bold]{name}[/bold]", detail)
+    return Panel(grid, title=f"[bold accent]{title} · {len(phases)} steps[/bold accent]",
+                 title_align="left", box=ROUNDED, border_style="accent",
+                 padding=(1, 2), expand=False)
