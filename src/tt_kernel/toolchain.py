@@ -260,6 +260,64 @@ def _vllm_component(python: Optional[str] = None) -> ComponentReport:
     return ComponentReport("vllm", True, version, required, True, "ok (vllm + TT plugin present)")
 
 
+@dataclass
+class EnvConflict:
+    """One unsatisfied requirement between two installed distributions."""
+    package: str
+    requirement: str
+    installed: Optional[str]
+
+    @property
+    def message(self) -> str:
+        have = f"have {self.installed}" if self.installed else "not installed"
+        return f"{self.package} requires {self.requirement} ({have})"
+
+
+def check_environment(python: Optional[str] = None) -> List[EnvConflict]:
+    """Report installed distributions whose requirements are mutually unsatisfiable.
+
+    Version checks alone said "toolchain adequate" on an environment pip had just called
+    broken: installing ttnn (which pins numpy<2) into a venv holding the vLLM fork (whose
+    opencv-python-headless wants numpy>=2) satisfies every individual check while leaving
+    the env internally inconsistent. Three imports resolving is not the same as an
+    environment that works, so ask pip.
+
+    Advisory by design: a conflict may involve a package the TT serving path never imports,
+    so callers should surface these and let the user judge, not block on them. Returns []
+    when pip cannot be run — an unavailable check is not a passing check, but it is also not
+    a conflict we can name.
+    """
+    exe = python or sys.executable
+    try:
+        proc = subprocess.run([exe, "-m", "pip", "check"], capture_output=True, text=True,
+                              timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode == 0:
+        return []
+    conflicts: List[EnvConflict] = []
+    # Real `pip check` output, captured from the venv in the bug report:
+    #   opencv-python-headless 5.0.0.93 has requirement numpy>=2; python_version >= "3.9",
+    #   but you have numpy 1.26.4.
+    # "has requirement" and "requires" are both in the wild depending on pip version, and a
+    # requirement may itself contain commas ("numpy>=1.24,<2"), so the split is on the
+    # literal ", but you have" rather than on any comma.
+    pattern = re.compile(
+        r"^(?P<pkg>\S+)\s+\S+\s+(?:has requirement|requires)\s+(?P<req>.+?),\s+"
+        r"but you have\s+(?P<have>.+?)\.?$"
+    )
+    for line in proc.stdout.splitlines():
+        m = pattern.match(line.strip())
+        if m:
+            have = m.group("have").strip()
+            conflicts.append(EnvConflict(
+                package=m.group("pkg"),
+                requirement=m.group("req").strip(),
+                installed=None if have.endswith("not installed") else have,
+            ))
+    return conflicts
+
+
 def check_toolchain(python: Optional[str] = None) -> ToolchainReport:
     """Inspect the local tt-metal + vLLM serving stack. Never imports the heavy modules and
     never installs anything — detection via metadata, find_spec, and the tt-metal version
@@ -284,4 +342,5 @@ def check_toolchain(python: Optional[str] = None) -> ToolchainReport:
     ])
 
 
-__all__ = ["LOCK", "ComponentReport", "ToolchainReport", "check_toolchain"]
+__all__ = ["LOCK", "ComponentReport", "EnvConflict", "ToolchainReport",
+           "check_environment", "check_toolchain"]
