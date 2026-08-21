@@ -581,3 +581,39 @@ def steps_panel_lines(title, phases):
     return Panel(grid, title=f"[bold accent]{title} · {len(phases)} steps[/bold accent]",
                  title_align="left", box=ROUNDED, border_style="accent",
                  padding=(1, 2), expand=False)
+
+
+def secret(prompt_text):
+    """Read a secret without echoing it.
+
+    getpass, not input(): a token pasted into a terminal that echoes ends up in scrollback
+    and shell history. Never call this inside a capturing step() — the prompt would be
+    swallowed and the CLI would look like it had hung.
+    """
+    import getpass
+
+    if activity.running():
+        activity.stop()
+    try:
+        return getpass.getpass(prompt_text)
+    except (EOFError, KeyboardInterrupt):
+        console.print()
+        return ""
+
+
+def stepper_line_for(title):
+    """The stepper with ``title`` marked active, without opening a phase context.
+
+    For the last step of a run that hands the terminal to a long-lived foreground child:
+    the user still needs to see where they are, but a phase whose spinner is alive when the
+    child starts printing would fight it for the row — and a "✓ Phase 4/4" line printed
+    when the child exits hours later is noise, not information.
+    """
+    for p in _phases:
+        if p["status"] == "active":
+            p["status"] = "done"
+    for p in _phases:
+        if p["title"] == title:
+            p["status"] = "active"
+            break
+    return stepper_line()

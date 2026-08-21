@@ -318,3 +318,32 @@ __all__ = [
     "health_check",
     "ENV_EXTRA_MODELS_DIR",
 ]
+
+
+def port_in_use(port: int, host: str = "127.0.0.1") -> bool:
+    """Whether something is already listening on ``port``.
+
+    One syscall, run before launch. Without it, `serve` spent ~18 seconds loading the vLLM
+    plugin and ttnn and then handed the user a 20-frame traceback from inside vLLM
+    (``OSError: [Errno 98] Address already in use``) for a condition knowable up front.
+
+    Deliberately only *detects*. tt-model does not own whatever holds the port, so it names
+    the problem and stops — it does not offer to kill a process it knows nothing about.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind((host, int(port)))
+        except OSError:
+            return True
+    return False
+
+
+def port_of(endpoint: str) -> Optional[int]:
+    """The port from a ``http://host:port`` endpoint string, or None."""
+    try:
+        return int(endpoint.rsplit(":", 1)[1].split("/")[0])
+    except (IndexError, ValueError):
+        return None

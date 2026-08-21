@@ -1,0 +1,206 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+"""`tt-model start` — the guided flow, and the prompt paths where a wizard rots.
+
+The failure mode of a badly-placed prompt is a *hang*, not an exception, so several of
+these assert on completing at all rather than on output. They are cheap; a hang in CI is
+not.
+"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+import typer
+from typer.testing import CliRunner
+
+from tt_kernel import cli, localdb, start, toolchain
+
+runner = CliRunner()
+CLI = [sys.executable, "-m", "tt_kernel.cli"]
+
+
+# ── prompting policy ─────────────────────────────────────────────────────────
+class TestPromptPolicy:
+    def test_explicit_token_never_prompts(self, monkeypatch):
+        monkeypatch.setattr(start.auth, "login", lambda token=None: None)
+        monkeypatch.setattr(start.auth, "whoami", lambda: {"name": "me"})
+        monkeypatch.setattr(start.console, "secret", _must_not_be_called)
+        acct = start.resolve_account("hf_x")
+        assert acct.logged_in and acct.source == "--token"
+
+    def test_existing_identity_never_prompts(self, monkeypatch):
+        monkeypatch.setattr(start.auth, "whoami", lambda: {"name": "me"})
+        monkeypatch.setattr(start.console, "secret", _must_not_be_called)
+        assert start.resolve_account().logged_in
+
+    def test_prompt_suppressed_when_not_allowed(self, monkeypatch):
+        """--yes and a non-TTY stdin must both reach this path. A prompt here would read
+        EOF and silently take a default the user never saw."""
+        monkeypatch.setattr(start.auth, "whoami", lambda: None)
+        monkeypatch.setattr(start.console, "secret", _must_not_be_called)
+        acct = start.resolve_account(allow_prompt=False)
+        assert not acct.logged_in and acct.source == "none"
+
+    def test_empty_prompt_is_not_treated_as_a_token(self, monkeypatch):
+        monkeypatch.setattr(start.auth, "whoami", lambda: None)
+        monkeypatch.setattr(start.console, "secret", lambda p: "   ")
+        monkeypatch.setattr(start.auth, "login", _must_not_be_called)
+        assert not start.resolve_account(allow_prompt=True).logged_in
+
+    def test_token_is_never_echoed_into_output(self, monkeypatch):
+        """A secret that reaches the renderer reaches scrollback and any log."""
+        monkeypatch.setattr(start.auth, "login", lambda token=None: None)
+        monkeypatch.setattr(start.auth, "whoami", lambda: {"name": "me"})
+        acct = start.resolve_account("hf_SUPERSECRET")
+        assert "hf_SUPERSECRET" not in repr(acct)
+        assert "hf_SUPERSECRET" not in str(acct.__dict__)
+
+
+def _must_not_be_called(*a, **k):
+    raise AssertionError("prompted when it must not")
+
+
+def test_stdin_detection_survives_a_closed_stdin(monkeypatch):
+    monkeypatch.setattr(sys, "stdin", None)
+    assert start.stdin_is_interactive() is False
+
+
+# ── the guided flow does not hang ────────────────────────────────────────────
+class TestNoHang:
+    def _env(self):
+        return dict(os.environ, COLUMNS="100")
+
+    def test_non_tty_stdin_completes(self):
+        """The canonical wizard bug: a prompt inside a capturing step, or on a piped stdin,
+        hangs instead of failing. Bounded so a regression shows up as a failure."""
+        res = subprocess.run(CLI + ["start", "nope/nope", "--print"],
+                             stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                             timeout=120, env=self._env())
+        assert res.returncode is not None
+
+    def test_yes_flag_completes(self):
+        res = subprocess.run(CLI + ["start", "nope/nope", "--print", "--yes"],
+                             capture_output=True, text=True, timeout=120, env=self._env())
+        assert res.returncode is not None
+
+
+# ── bundle resolution ────────────────────────────────────────────────────────
+class TestResolveBundle:
+    def test_an_installed_id_resolves_to_itself(self, monkeypatch):
+        monkeypatch.setattr(start.localdb, "get", lambda rid: {"repo_id": rid})
+        assert start.resolve_bundle("org/m") == ("org/m", "installed")
+
+    def test_a_bare_model_id_finds_an_installed_bundle(self, monkeypatch):
+        """`tt-model start Qwen/Qwen3-32B` should find mando2222/Qwen3-32B-blackhole rather
+        than trying to pull a bundle id the user never typed."""
+        monkeypatch.setattr(start.localdb, "get", lambda rid: None)
+        monkeypatch.setattr(start.localdb, "all_entries",
+                            lambda: [{"repo_id": "mando2222/Qwen3-32B-blackhole"}])
+        repo, how = start.resolve_bundle("Qwen/Qwen3-32B")
+        assert repo == "mando2222/Qwen3-32B-blackhole"
+        assert "matching" in how
+
+    def test_an_unknown_id_is_left_to_pull(self, monkeypatch):
+        monkeypatch.setattr(start.localdb, "get", lambda rid: None)
+        monkeypatch.setattr(start.localdb, "all_entries", lambda: [])
+        assert start.resolve_bundle("org/new") == ("org/new", "to pull")
+
+
+# ── validation gate ──────────────────────────────────────────────────────────
+def _report(ok=True):
+    return toolchain.ToolchainReport(components=[
+        toolchain.ComponentReport("tt-metal", ok, "0.77.0" if ok else None, "0.72.0", ok,
+                                  "ok" if ok else "not found"),
+    ])
+
+
+class TestValidate:
+    def _env(self, *, ok=True, port_free=True):
+        return start.Environment(report=_report(ok), arch="blackhole", device_count=4,
+                                 device_source="tt-smi", port=8000, port_free=port_free,
+                                 conflicts=[])
+
+    def test_a_busy_port_is_a_blocker(self):
+        assert "port 8000 is already in use" in self._env(port_free=False).blockers
+
+    def test_an_inadequate_component_is_a_blocker(self):
+        assert any("tt-metal" in b for b in self._env(ok=False).blockers)
+
+    def test_a_healthy_environment_has_no_blockers(self):
+        assert self._env().blockers == []
+
+    def test_conflicts_are_reported_but_do_not_block(self):
+        """An environment conflict may involve a package the TT path never imports, so it
+        is surfaced and not enforced — the same call the doctor change makes."""
+        env = self._env()
+        env.conflicts = [toolchain.EnvConflict("opencv", "numpy>=2", "numpy 1.26.4")]
+        assert env.blockers == []
+
+    def test_blocked_validation_pulls_nothing(self, monkeypatch):
+        """The gate exists so a doomed run stops before touching the Hub."""
+        called = []
+        monkeypatch.setattr(cli, "_ensure_vllm_pulled",
+                            lambda *a, **k: called.append(a) or {})
+        monkeypatch.setattr(start, "validate", lambda *a, **k: self._env(port_free=False))
+        res = runner.invoke(cli.app, ["start", "org/m", "--print", "--yes"])
+        assert res.exit_code == 1
+        assert called == [], "pulled despite a failed validation"
+        assert "Nothing was pulled or started" in res.output
+
+
+# ── roadmap integrity ────────────────────────────────────────────────────────
+def test_every_phase_has_a_description():
+    """The upfront panel and the stepper read from the same list; a phase with no detail
+    would render a blank row."""
+    assert set(start.PHASES) == set(start.PHASE_DETAIL)
+    assert all(start.PHASE_DETAIL[p] for p in start.PHASES)
+
+
+def test_phase_count_is_fixed_and_not_flag_dependent():
+    """k/N is only trustworthy if N cannot drift with flags."""
+    assert len(start.PHASES) == 4
+
+
+# ── did-you-mean for a slipped word (F5) ─────────────────────────────────────
+class TestDidYouMean:
+    def test_two_command_names_in_a_row_suggests_the_later_one(self):
+        """`pull serve <id>` reads as "serve <id>" with a stray word; the trailing tokens
+        follow the intent, not the typo."""
+        assert cli._did_you_mean(["pull", "serve", "x/y"]) == "tt-model serve x/y"
+
+    def test_the_direction_is_not_hardcoded(self):
+        assert cli._did_you_mean(["serve", "pull", "x/y"]) == "tt-model pull x/y"
+
+    @pytest.mark.parametrize("argv", [
+        ["pull", "x/y"],                 # correct usage
+        ["pull", "x/y", "z/w"],          # two repo ids: not a slipped command name
+        ["install"],                     # too short
+        ["pull", "pull", "x/y"],         # same word twice is not a slip we can resolve
+        ["instances", "list"],           # a real two-word command
+    ])
+    def test_no_suggestion_when_there_is_nothing_to_infer(self, argv):
+        """A wrong hint is worse than none: it sends the user somewhere they did not ask
+        to go, on a command that may have failed for an unrelated reason."""
+        assert cli._did_you_mean(argv) is None
+
+    def test_end_to_end_hint_appears_on_the_usage_error(self):
+        res = runner.invoke(cli.app, ["pull", "serve", "x/y"])
+        assert res.exit_code != 0
+        assert "Did you mean" in res.output
+        assert "tt-model serve x/y" in res.output
+
+    def test_valid_commands_never_get_a_hint(self):
+        res = runner.invoke(cli.app, ["--help"])
+        assert "Did you mean" not in res.output
+
+    def test_usage_error_classes_cover_typers_vendored_fork(self):
+        """Typer vendors its own click, so a subcommand parse failure raises
+        typer._click.exceptions.UsageError — NOT a subclass of click.UsageError. Catching
+        only the latter silently matched nothing."""
+        names = {c.__module__ for c in cli._USAGE_ERRORS}
+        assert any("typer" in n for n in names), names
+        assert any(n.startswith("click") for n in names), names

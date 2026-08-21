@@ -163,3 +163,46 @@ class TestPty:
     def test_no_color_strips_styling_even_on_a_tty(self):
         raw = run_in_pty(["--no-color"] + TARGETS["plain"])
         assert "\x1b[3" not in raw and "\x1b[9" not in raw, "--no-color still emitted colour"
+
+
+# ── 5. --help is documentation ────────────────────────────────────────────────
+EXPECTED_PANELS = ["Get started", "Run a model", "Get models", "Publish models",
+                   "Environment", "Maintenance"]
+
+
+class TestHelpGrouping:
+    def _help(self):
+        return run(["--help"], columns=100).stdout
+
+    def test_every_panel_is_present(self):
+        out = self._help()
+        for panel in EXPECTED_PANELS:
+            assert panel in out, f"missing help panel: {panel}"
+
+    def test_get_started_comes_first(self):
+        """Panel order follows source order of the first command in each. A new user should
+        meet `start`/`install` before `push`."""
+        out = self._help()
+        positions = {p: out.index(p) for p in EXPECTED_PANELS if p in out}
+        assert positions["Get started"] == min(positions.values())
+
+    def test_every_command_lives_in_a_panel(self):
+        """An ungrouped command falls into a generic "Commands" box, which is how a flat
+        30-item list grows back."""
+        out = self._help()
+        assert "─ Commands ─" not in out, "some command is not assigned to a panel"
+
+    def test_developer_fixtures_are_hidden(self):
+        """`dev` fabricates test data; it should not crowd help for people running models."""
+        out = self._help()
+        assert "make-test-cache" not in out
+        assert "\ndev " not in out
+
+    def test_the_guided_entry_point_is_advertised(self):
+        assert "start" in self._help()
+
+    @pytest.mark.parametrize("cmd", ["start", "install", "serve", "pull", "doctor"])
+    def test_each_command_help_renders_and_is_escape_free_when_piped(self, cmd):
+        res = run([cmd, "--help"], columns=100)
+        assert res.returncode == 0, res.stderr
+        assert "\x1b" not in res.stdout

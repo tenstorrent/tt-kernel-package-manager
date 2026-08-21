@@ -17,13 +17,16 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
+import click
 import typer
+from typer.core import TyperGroup
 
 from . import console
 from . import MANIFEST_NAME, TT_MODEL_CATALOG_TAG, TT_MODEL_TAG, __version__
 from . import (
     auth, bundles, cache, compat, device, devtools, hub, instances, localdb, metal,
-    packaging, provision, resolve as resolve_mod, runtime, toolchain,
+    packaging, provision, resolve as resolve_mod, runtime,
+    start as start_mod, toolchain,
 )
 from .manifest import (
     CompatibilityReport,
@@ -38,6 +41,87 @@ from .manifest import (
     runner_version_advisory,
 )
 
+def _did_you_mean(argv: List[str]) -> Optional[str]:
+    """Suggest a corrected command line for a slipped word.
+
+    `tt-model pull serve <id>` produced a bare "Got unexpected extra argument(s)". Both
+    tokens are real command names and the trailing one looks like a repo id, so the intent
+    is recoverable — and a CLI that can name the fix should.
+
+    Pure (argv in, string or None out) so the matrix is testable without invoking Click.
+    """
+    commands = {c.name for c in app.registered_commands if c.name} | {
+        (c.name or (c.callback.__name__ if c.callback else None))
+        for c in app.registered_commands
+    }
+    commands |= {"instances", "dev"}
+    commands = {c.replace("_", "-") for c in commands if c}
+    # Click passes us the args after the program name.
+    words = [a for a in argv if not a.startswith("-")]
+    if len(words) < 3:
+        return None
+    first, second = words[0], words[1]
+    if first in commands and second in commands and first != second:
+        # Two command names in a row: the user typed one too many. The later one usually
+        # carries the intent (`pull serve X` reads as "serve X"), and the rest follows it.
+        rest = " ".join(words[2:])
+        return f"tt-model {second} {rest}".strip()
+    return None
+
+
+def _usage_error_classes():
+    """Every UsageError class that can reach us.
+
+    Typer (>=0.16) vendors its own click fork, so a usage error raised while parsing a
+    subcommand is `typer._click.exceptions.UsageError` and is NOT a subclass of
+    `click.UsageError`. Catching only the latter silently matched nothing. Collect both,
+    tolerating either being absent so a Typer/click upgrade degrades to "no hint" rather
+    than an import error.
+    """
+    classes = [click.UsageError]
+    try:  # pragma: no cover - depends on the installed Typer layout
+        from typer._click.exceptions import UsageError as TyperUsageError
+
+        classes.append(TyperUsageError)
+    except Exception:  # noqa: BLE001
+        pass
+    return tuple(dict.fromkeys(classes))
+
+
+_USAGE_ERRORS = _usage_error_classes()
+
+
+class _SuggestingGroup(TyperGroup):
+    """Adds a "Did you mean" line to Click's usage errors where we can infer one.
+
+    Both hooks are needed: an unknown command fails in resolve_command, while
+    `pull serve <id>` resolves `pull` fine and then fails on extra arguments inside
+    make_context, which happens under invoke.
+    """
+
+    def _augment(self, exc, args):
+        hint = _did_you_mean([a for a in args])
+        if hint and "Did you mean" not in (exc.message or ""):
+            exc.message = f"{exc.message}\n\nDid you mean:  {hint}"
+        return exc
+
+    def resolve_command(self, ctx, args):
+        try:
+            return super().resolve_command(ctx, args)
+        except _USAGE_ERRORS as exc:
+            raise self._augment(exc, list(args))
+
+    def invoke(self, ctx):
+        # Snapshot the argv BEFORE delegating: TyperGroup.invoke does `ctx.args = []` and
+        # `ctx._protected_args = []` before the make_context call that raises, so reading
+        # them from the except block yields nothing.
+        argv = [*getattr(ctx, "_protected_args", []), *ctx.args]
+        try:
+            return super().invoke(ctx)
+        except _USAGE_ERRORS as exc:
+            raise self._augment(exc, argv)
+
+
 app = typer.Typer(
     name="tt-model",
     help="Publish and pull precompiled tt-metal kernel caches over Hugging Face Hub.",
@@ -48,6 +132,7 @@ app = typer.Typer(
     # huggingface_hub. A traceback is not a user-facing error message; the handlers
     # below render a diagnosis card instead. `--verbose` puts the traceback back.
     pretty_exceptions_enable=False,
+    cls=_SuggestingGroup,
 )
 
 # Sub-app for the tt-metal instance registry (the supply side of version resolution).
@@ -58,7 +143,7 @@ instances_app = typer.Typer(
     add_completion=False,
     pretty_exceptions_enable=False,
 )
-app.add_typer(instances_app)
+app.add_typer(instances_app, rich_help_panel="Environment")
 
 # Developer fixtures. Hidden: these fabricate test data and are not part of any user flow,
 # so they should not crowd `--help` for the people running models.
@@ -153,20 +238,6 @@ def _print_report(report: CompatibilityReport) -> None:
         )
 
 
-# --------------------------------------------------------------------------- login
-@app.command()
-def login(
-    token: Optional[str] = typer.Option(None, help="HF token; omit for interactive login."),
-) -> None:
-    """Log in to Hugging Face (reuses HF's token store)."""
-    auth.login(token=token)
-    me = auth.whoami()
-    if me:
-        typer.secho(f"Logged in as {me.get('name')}", fg=typer.colors.GREEN)
-    else:
-        raise _err("Login did not produce a valid identity.")
-
-
 def _ensure_repo(repo_id: str, private: Optional[bool], *, publish: bool = False) -> None:
     """Make sure ``repo_id`` exists, without ever changing visibility as a side effect.
 
@@ -218,8 +289,281 @@ def _is_private_or_unknown(repo_id: str) -> bool:
     return hub.is_private_safe(repo_id) is not False
 
 
+# -------------------------------------------------------------------------- start
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True}, rich_help_panel="Get started")
+def start(
+    ctx: typer.Context,
+    model: str = typer.Argument(..., help="Model or bundle id to serve."),
+    token: Optional[str] = typer.Option(None, "--token", help="Hugging Face token (else $HF_TOKEN, the HF token store, or a prompt)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Never prompt; fail instead if something is missing."),
+    port: int = typer.Option(8000, "--port", help="Port to serve on."),
+    print_only: bool = typer.Option(False, "--print", help="Print the launch command instead of running it."),
+    local_only: bool = typer.Option(False, "--local-only", help="Require an installed bundle; never hit the Hub."),
+    instance: Optional[str] = typer.Option(None, "--instance", help="Force a registered tt-metal instance by name."),
+    arch: Optional[str] = typer.Option(None, "--arch", help="Override arch detection."),
+) -> None:
+    """Get a model serving, in four guided steps.
+
+    Walks account -> environment -> model -> serve, stopping at the first step that cannot succeed rather than failing later with less context. Everything it does is available as an individual command; this is the path that sequences them.
+    """
+    extra_args = list(ctx.args)
+    console.register_phases(start_mod.PHASES)
+    console.console.print(console.steps_panel_lines(
+        "tt-model", [(t, start_mod.PHASE_DETAIL[t]) for t in start_mod.PHASES]))
+
+    # ---- 1. Account. The prompt lives OUTSIDE any step(): a capturing step would swallow
+    # it and the CLI would appear to hang waiting on input nobody can see.
+    with console.phase("Account"):
+        allow_prompt = not yes and start_mod.stdin_is_interactive()
+        account = start_mod.resolve_account(token, allow_prompt=allow_prompt)
+        if account.logged_in:
+            console.note(f"{account.name or 'authenticated'} — via {account.source}",
+                         marker="✓", style="success")
+        else:
+            console.note("not logged in — public bundles only", marker="○", style="muted")
+
+    # ---- 2. Validate. Raised through the phase so the stepper shows ✗, with the card
+    # rendered after it collapses rather than above its own phase line.
+    try:
+        with console.phase("Validate"):
+            env = start_mod.validate(port, arch_override=arch)
+            tbl = console.check_table()
+            for c in env.report.components:
+                tbl.add_row("[success]✓[/success]" if c.adequate else "[error]✗[/error]",
+                            c.name, console.fmt_version(c.version),
+                            f"require >= {c.required}")
+            tbl.add_row("[success]✓[/success]" if env.arch else "[warning]![/warning]",
+                        "hardware", env.arch or "none detected",
+                        f"{env.device_count} device(s) via {env.device_source}"
+                        if env.arch else "")
+            tbl.add_row("[success]✓[/success]" if env.port_free else "[error]✗[/error]",
+                        f"port {env.port}", "free" if env.port_free else "in use", "")
+            console.print_table(tbl)
+            for c in env.conflicts:
+                console.note(c.message, marker="!", style="warning")
+            blockers = env.blockers
+            if blockers:
+                raise _PreflightFailed()
+    except _PreflightFailed:
+        raise _start_blocked(env.blockers, env)
+
+    # ---- 3. Model.
+    with console.phase("Model"):
+        repo_id, how = start_mod.resolve_bundle(model)
+        console.note(f"{repo_id} — {how}", marker="○", style="muted")
+        if not start_mod.is_installed(repo_id):
+            if local_only:
+                raise _err(f"No installed bundle for {repo_id} (and --local-only forbids a pull).")
+            _ensure_vllm_pulled(repo_id, None, arch=arch, bundles_dir=None,
+                                instance=instance)
+        console.milestone(f"ready: {repo_id}")
+
+    # ---- 4. Serve. The phase is closed before handing the terminal to vLLM: a still-
+    # ticking spinner and a foreground child would fight for the same row.
+    console.console.print(console.stepper_line_for("Serve"))
+    _serve_vllm(repo_id, None, print_only=print_only, local_only=True, arch=arch,
+                bundles_dir=None, do_health=False, instance=instance,
+                extra_args=(["--port", str(port)] if port != 8000 else []) + extra_args)
+
+
+def _start_blocked(blockers: List[str], env) -> "typer.Exit":
+    """Stop at Validate rather than failing later with less context."""
+    lines = [f"[error]{b}[/error]" for b in blockers]
+    lines += ["", "[warning]Nothing was pulled or started.[/warning]", "", "[info]Try:[/info]"]
+    if any("port" in b for b in blockers):
+        lines.append(f"[muted]  tt-model start <model> --port <n>[/muted]")
+    if any(c.name in b for b in blockers for c in env.report.components):
+        lines.append("[muted]  tt-model install[/muted]")
+    lines.append("[muted]  tt-model doctor[/muted]")
+    return _fail_panel("Validate", lines, code=1)
+
+# ------------------------------------------------------------------------- install
+@app.command(rich_help_panel="Get started")
+def install(
+    venv: Optional[str] = typer.Option(
+        None, "--venv", help="Python venv to install into. Default: $VIRTUAL_ENV, else an "
+        "auto-detected tt-metal venv with importable ttnn, else this interpreter."
+    ),
+    vllm_dir: str = typer.Option(
+        provision.DEFAULT_VLLM_DIR, "--vllm-dir", help="Where to clone the vLLM fork."
+    ),
+    vllm_ref: str = typer.Option(
+        provision.DEFAULT_VLLM_REF, "--vllm-ref",
+        help="Branch/ref of the fork (default: dev — the plugin work does not live on main)."
+    ),
+    allow_no_ttnn: bool = typer.Option(
+        False, "--allow-no-ttnn", envvar="TT_MODEL_ALLOW_NO_TTNN",
+        help="Install the serving layers even without ttnn. The result CANNOT serve a "
+        "model — use this only to pre-bake an image."
+    ),
+) -> None:
+    """Install the serving stack (Tenstorrent vLLM fork + plugin) and tt-model, then verify.
+
+    This is the one tt-model command that provisions the host. It expects tt-metal (ttnn) to already be importable in the target environment — building that is out of scope — and stops before installing anything if it is not.
+
+    Exit codes: 0 installed and adequate · 1 preflight failed (nothing installed) · 2 usage error · 3 installed, but the toolchain is still not adequate.
+    """
+    if vllm_ref == "main":
+        # PROTECTED FACT: the TT vLLM plugin work lives on `dev`.
+        raise _err("The Tenstorrent vLLM plugin work lives on 'dev', not 'main'. "
+                   "Refusing --vllm-ref main.")
+
+    console.register_phases(provision.PHASES)
+    console.console.print(console.steps_panel_lines(
+        "tt-model install", [(t, provision.PHASE_DETAIL[t]) for t in provision.PHASES]))
+
+    # ---- 1. Preflight: everything below installs, so this is the last free exit.
+    # The verdict is rendered *after* the phase collapses. A card printed inside the phase
+    # body lands above its own "✗ Phase 1/5" line, which reads backwards.
+    try:
+        with console.phase("Preflight"):
+            pre = provision.check(venv, vllm_ref=vllm_ref, allow_no_ttnn=allow_no_ttnn)
+            tbl = console.check_table()
+            mark = "[success]✓[/success]" if pre.target.usable else "[error]✗[/error]"
+            tbl.add_row(mark, "python", _short_path(pre.target.python), pre.target.source)
+            if pre.target.usable:
+                tbl.add_row("[success]✓[/success]" if pre.ttnn_ok else "[warning]![/warning]",
+                            "ttnn", "importable" if pre.ttnn_ok else "not importable",
+                            "the tt-metal runtime")
+            tbl.add_row("[success]✓[/success]", "vllm ref", vllm_ref, "tenstorrent/vllm")
+            console.print_table(tbl)
+            if not pre.ok:
+                raise _PreflightFailed()
+    except _PreflightFailed:
+        raise _preflight_failed(pre)
+    if not pre.ttnn_ok:
+        console.note("continuing without ttnn (--allow-no-ttnn): this environment will "
+                     "NOT be able to serve a model", marker="!", style="warning")
+
+    python = pre.target.python
+    target_dir = Path(vllm_dir).expanduser()
+
+    # ---- 2. The vLLM fork.
+    with console.phase("vLLM fork") as ph:
+        try:
+            cloned, detail = provision.clone_or_reuse_vllm(target_dir, vllm_ref)
+        except RuntimeError as exc:
+            ph["status"] = "failed"
+            raise _fail_card("vLLM fork", {
+                "cause": "could not clone the fork",
+                "detail": f"git clone of {provision.VLLM_REPO}@{vllm_ref} failed.",
+                "evidence": str(exc).splitlines()[-1] if str(exc) else "",
+                "actions": [f"check network access to {provision.VLLM_REPO}",
+                            f"clone it yourself, then: tt-model install --vllm-dir {target_dir}"],
+            }, consequence="Nothing was installed.")
+        console.note(detail, marker="✓" if cloned else "○",
+                     style="success" if cloned else "muted")
+
+    # ---- 3. The serving layer. Tenstorrent has NO CUDA: build vLLM with the 'empty'
+    # device target and pull CPU torch — all compute runs through the TT out-of-tree
+    # platform (device "tt"). A plain pip install would default to VLLM_TARGET_DEVICE=cuda.
+    with console.phase("Serving layer"):
+        env = {**os.environ, "VLLM_TARGET_DEVICE": "empty"}
+        rc, out = provision.pip_install(
+            python, ["-e", str(target_dir),
+                     "--extra-index-url", "https://download.pytorch.org/whl/cpu"],
+            label="Installing vLLM fork", env=env)
+        if rc != 0:
+            raise _pip_failed("Serving layer", "the vLLM fork", rc, out)
+        console.milestone("vLLM fork (editable)")
+        rc, out = provision.pip_install(
+            python, ["-e", str(target_dir / "plugins" / "vllm-tt-plugin")],
+            label="Installing TT plugin")
+        if rc != 0:
+            raise _pip_failed("Serving layer", "the TT plugin", rc, out)
+        console.milestone("TT plugin (editable)")
+
+    # ---- 4. tt-model itself.
+    with console.phase("tt-model"):
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        rc, out = provision.pip_install(python, ["-e", str(repo_root)],
+                                        label="Installing tt-model")
+        if rc != 0:
+            raise _pip_failed("tt-model", "tt-model", rc, out)
+        console.milestone(f"tt-model (editable) — {_short_path(str(repo_root))}")
+
+    # ---- 5. Verify. The verdict decides which closing message is honest, so it is
+    # captured rather than discarded: the old script ran `doctor || true` and printed
+    # "Done. Serve a model with..." over a doctor that had just exited non-zero.
+    with console.phase("Verify"):
+        verdict = provision.verify(python)
+
+    _install_summary(verdict, python, allow_no_ttnn=allow_no_ttnn)
+
+
+class _PreflightFailed(Exception):
+    """Marks the phase failed so the stepper shows ✗, without the card landing inside it."""
+
+
+def _short_path(path: Optional[str]) -> str:
+    """Collapse $HOME to ~ so a long interpreter path stays readable in a row."""
+    if not path:
+        return "—"
+    home = os.path.expanduser("~")
+    return path.replace(home, "~", 1) if path.startswith(home) else path
+
+
+def _preflight_failed(pre) -> "typer.Exit":
+    """The card for a preflight that stopped before installing anything.
+
+    Each suggested command gets its own line with the rationale beneath it, so nothing
+    wraps mid-flag — a command the user cannot copy is not a suggestion.
+    """
+    lines = [f"[error]{pre.blockers[0]}[/error]"]
+    if pre.target.python:
+        lines.append(f"[muted]{_short_path(pre.target.python)}  ({pre.target.source})[/muted]")
+    lines += ["", "[error]Nothing was installed.[/error]", ""]
+    lines.append("[info]" + ("Two ways forward:" if len(pre.routes) > 1 else "Try:") + "[/info]")
+    for cmd, why in pre.routes:
+        lines += [f"  {cmd}", f"[muted]    {why}[/muted]"]
+    if pre.escape:
+        lines += ["", f"  {pre.escape[0]}", f"[muted]    {pre.escape[1]}[/muted]"]
+    return _fail_panel("Preflight", lines, code=provision.EXIT_PREFLIGHT)
+
+
+def _fail_panel(title: str, lines: List[str], *, code: int = 1) -> "typer.Exit":
+    console.console.print(console.notice_panel(f"[error]{title}[/error]", lines,
+                                               border_style="error"))
+    return typer.Exit(code=code)
+
+
+def _pip_failed(phase_name: str, what: str, rc: int, out: str) -> "typer.Exit":
+    return _fail_card(phase_name, {
+        "cause": f"pip install of {what} failed",
+        "detail": f"pip exited {rc}. The captured output is below the card.",
+        "evidence": provision.pip_error_line(out),
+        "actions": ["re-run with --verbose to watch pip live",
+                    "check disk space and network, then re-run"],
+    }, consequence="Whatever installed before this point is still in place.")
+
+
+def _install_summary(verdict, python: str, *, allow_no_ttnn: bool) -> None:
+    """Close with a claim that matches what doctor actually found."""
+    rows = [(c.name, console.fmt_version(c.version), "" if c.adequate else "missing")
+            for c in verdict.report.components]
+    if verdict.report.ok and not allow_no_ttnn:
+        console.console.print(console.ready_panel(
+            "Serving stack installed", rows,
+            [f"[muted]Serve  ·[/muted]  tt-model serve <namespace>/<model>",
+             f"[muted]Check  ·[/muted]  tt-model doctor"]))
+        return
+    lines = [f"[muted]{n:<10}[/muted] {v}" + (f"  [error]{s}[/error]" if s else "")
+             for n, v, s in rows]
+    lines += ["", "[warning]Everything this command installs is in place. What is missing "
+              "above is built separately and is out of scope here.[/warning]",
+              "", "[info]Try:[/info]",
+              f"[muted]  {python} -m pip install \"{provision.TTNN_PYPI_SPEC}\"[/muted]",
+              "[muted]  tt-model install --venv <tt-metal>/python_env[/muted]",
+              "[muted]  tt-model doctor[/muted]"]
+    console.console.print(console.notice_panel(
+        "[warning]Installed, but the stack cannot serve yet[/warning]", lines,
+        border_style="warning"))
+    raise typer.Exit(code=provision.EXIT_INADEQUATE)
+
+
+
 # ---------------------------------------------------------------------------- push
-@app.command()
+@app.command(rich_help_panel="Publish models")
 def push(
     repo_id: str = typer.Argument(..., help="Target repo as namespace/name."),
     private: Optional[bool] = typer.Option(
@@ -724,7 +1068,7 @@ def _classify_wheels(wheels_dir: Path) -> dict:
     return found
 
 
-@app.command()
+@app.command(rich_help_panel="Publish models")
 def package(
     repo_id: Optional[str] = typer.Argument(
         None, help="Target HF repo namespace/name to push to. Omit (with --out) to only stage locally."
@@ -937,7 +1281,7 @@ def package(
 
 
 # ---------------------------------------------------------------------------- pull
-@app.command()
+@app.command(rich_help_panel="Get models")
 def pull(
     repo_id: str = typer.Argument(..., help="Source repo as namespace/name[@revision]."),
     force: bool = typer.Option(False, "--force", help="Install despite non-fatal mismatches."),
@@ -1027,8 +1371,9 @@ def pull(
         wheel_entries = [f for f in manifest.files if f.path.startswith("python/")]
         kernel_entries = [f for f in manifest.files if not f.path.startswith("python/")]
 
-        typer.echo(f"Verifying {len(kernel_entries)} kernel files ...")
         problems = cache.verify_files(staged, kernel_entries)
+        if not problems:
+            console.milestone(f"verified {len(kernel_entries)} kernel file(s)")
         if problems:
             for p in problems[:20]:
                 typer.secho(f"  {p}", fg=typer.colors.RED)
@@ -1386,10 +1731,11 @@ def _install_vllm_bundle(
             "refusing to install unverified code. Re-publish with a current tt-model."
         )
     if bundle_entries:
-        typer.echo(f"Verifying {len(bundle_entries)} bundle file(s) ...")
         # verify_files takes paths relative to a root; the entry paths carry the subdir prefix,
         # so verify against the snapshot root.
         problems = cache.verify_files(snapshot, bundle_entries)
+        if not problems:
+            console.milestone(f"verified {len(bundle_entries)} bundle file(s)")
         if problems:
             for p in problems[:20]:
                 typer.secho(f"  {p}", fg=typer.colors.RED)
@@ -1540,190 +1886,6 @@ def instances_scan(
                     f"({py})", fg=typer.colors.GREEN)
 
 
-# ------------------------------------------------------------------------- install
-@app.command()
-def install(
-    venv: Optional[str] = typer.Option(
-        None, "--venv", help="Python venv to install into. Default: $VIRTUAL_ENV, else an "
-        "auto-detected tt-metal venv with importable ttnn, else this interpreter."
-    ),
-    vllm_dir: str = typer.Option(
-        provision.DEFAULT_VLLM_DIR, "--vllm-dir", help="Where to clone the vLLM fork."
-    ),
-    vllm_ref: str = typer.Option(
-        provision.DEFAULT_VLLM_REF, "--vllm-ref",
-        help="Branch/ref of the fork (default: dev — the plugin work does not live on main)."
-    ),
-    allow_no_ttnn: bool = typer.Option(
-        False, "--allow-no-ttnn", envvar="TT_MODEL_ALLOW_NO_TTNN",
-        help="Install the serving layers even without ttnn. The result CANNOT serve a "
-        "model — use this only to pre-bake an image."
-    ),
-) -> None:
-    """Install the serving stack (Tenstorrent vLLM fork + plugin) and tt-model, then verify.
-
-    This is the one tt-model command that provisions the host. It expects tt-metal (ttnn) to already be importable in the target environment — building that is out of scope — and stops before installing anything if it is not.
-
-    Exit codes: 0 installed and adequate · 1 preflight failed (nothing installed) · 2 usage error · 3 installed, but the toolchain is still not adequate.
-    """
-    if vllm_ref == "main":
-        # PROTECTED FACT: the TT vLLM plugin work lives on `dev`.
-        raise _err("The Tenstorrent vLLM plugin work lives on 'dev', not 'main'. "
-                   "Refusing --vllm-ref main.")
-
-    console.register_phases(provision.PHASES)
-    console.console.print(console.steps_panel_lines(
-        "tt-model install", [(t, provision.PHASE_DETAIL[t]) for t in provision.PHASES]))
-
-    # ---- 1. Preflight: everything below installs, so this is the last free exit.
-    # The verdict is rendered *after* the phase collapses. A card printed inside the phase
-    # body lands above its own "✗ Phase 1/5" line, which reads backwards.
-    try:
-        with console.phase("Preflight"):
-            pre = provision.check(venv, vllm_ref=vllm_ref, allow_no_ttnn=allow_no_ttnn)
-            tbl = console.check_table()
-            mark = "[success]✓[/success]" if pre.target.usable else "[error]✗[/error]"
-            tbl.add_row(mark, "python", _short_path(pre.target.python), pre.target.source)
-            if pre.target.usable:
-                tbl.add_row("[success]✓[/success]" if pre.ttnn_ok else "[warning]![/warning]",
-                            "ttnn", "importable" if pre.ttnn_ok else "not importable",
-                            "the tt-metal runtime")
-            tbl.add_row("[success]✓[/success]", "vllm ref", vllm_ref, "tenstorrent/vllm")
-            console.print_table(tbl)
-            if not pre.ok:
-                raise _PreflightFailed()
-    except _PreflightFailed:
-        raise _preflight_failed(pre)
-    if not pre.ttnn_ok:
-        console.note("continuing without ttnn (--allow-no-ttnn): this environment will "
-                     "NOT be able to serve a model", marker="!", style="warning")
-
-    python = pre.target.python
-    target_dir = Path(vllm_dir).expanduser()
-
-    # ---- 2. The vLLM fork.
-    with console.phase("vLLM fork") as ph:
-        try:
-            cloned, detail = provision.clone_or_reuse_vllm(target_dir, vllm_ref)
-        except RuntimeError as exc:
-            ph["status"] = "failed"
-            raise _fail_card("vLLM fork", {
-                "cause": "could not clone the fork",
-                "detail": f"git clone of {provision.VLLM_REPO}@{vllm_ref} failed.",
-                "evidence": str(exc).splitlines()[-1] if str(exc) else "",
-                "actions": [f"check network access to {provision.VLLM_REPO}",
-                            f"clone it yourself, then: tt-model install --vllm-dir {target_dir}"],
-            }, consequence="Nothing was installed.")
-        console.note(detail, marker="✓" if cloned else "○",
-                     style="success" if cloned else "muted")
-
-    # ---- 3. The serving layer. Tenstorrent has NO CUDA: build vLLM with the 'empty'
-    # device target and pull CPU torch — all compute runs through the TT out-of-tree
-    # platform (device "tt"). A plain pip install would default to VLLM_TARGET_DEVICE=cuda.
-    with console.phase("Serving layer"):
-        env = {**os.environ, "VLLM_TARGET_DEVICE": "empty"}
-        rc, out = provision.pip_install(
-            python, ["-e", str(target_dir),
-                     "--extra-index-url", "https://download.pytorch.org/whl/cpu"],
-            label="Installing vLLM fork", env=env)
-        if rc != 0:
-            raise _pip_failed("Serving layer", "the vLLM fork", rc, out)
-        console.milestone("vLLM fork (editable)")
-        rc, out = provision.pip_install(
-            python, ["-e", str(target_dir / "plugins" / "vllm-tt-plugin")],
-            label="Installing TT plugin")
-        if rc != 0:
-            raise _pip_failed("Serving layer", "the TT plugin", rc, out)
-        console.milestone("TT plugin (editable)")
-
-    # ---- 4. tt-model itself.
-    with console.phase("tt-model"):
-        repo_root = Path(__file__).resolve().parent.parent.parent
-        rc, out = provision.pip_install(python, ["-e", str(repo_root)],
-                                        label="Installing tt-model")
-        if rc != 0:
-            raise _pip_failed("tt-model", "tt-model", rc, out)
-        console.milestone(f"tt-model (editable) — {_short_path(str(repo_root))}")
-
-    # ---- 5. Verify. The verdict decides which closing message is honest, so it is
-    # captured rather than discarded: the old script ran `doctor || true` and printed
-    # "Done. Serve a model with..." over a doctor that had just exited non-zero.
-    with console.phase("Verify"):
-        verdict = provision.verify(python)
-
-    _install_summary(verdict, python, allow_no_ttnn=allow_no_ttnn)
-
-
-class _PreflightFailed(Exception):
-    """Marks the phase failed so the stepper shows ✗, without the card landing inside it."""
-
-
-def _short_path(path: Optional[str]) -> str:
-    """Collapse $HOME to ~ so a long interpreter path stays readable in a row."""
-    if not path:
-        return "—"
-    home = os.path.expanduser("~")
-    return path.replace(home, "~", 1) if path.startswith(home) else path
-
-
-def _preflight_failed(pre) -> "typer.Exit":
-    """The card for a preflight that stopped before installing anything.
-
-    Each suggested command gets its own line with the rationale beneath it, so nothing
-    wraps mid-flag — a command the user cannot copy is not a suggestion.
-    """
-    lines = [f"[error]{pre.blockers[0]}[/error]"]
-    if pre.target.python:
-        lines.append(f"[muted]{_short_path(pre.target.python)}  ({pre.target.source})[/muted]")
-    lines += ["", "[error]Nothing was installed.[/error]", ""]
-    lines.append("[info]" + ("Two ways forward:" if len(pre.routes) > 1 else "Try:") + "[/info]")
-    for cmd, why in pre.routes:
-        lines += [f"  {cmd}", f"[muted]    {why}[/muted]"]
-    if pre.escape:
-        lines += ["", f"  {pre.escape[0]}", f"[muted]    {pre.escape[1]}[/muted]"]
-    return _fail_panel("Preflight", lines, code=provision.EXIT_PREFLIGHT)
-
-
-def _fail_panel(title: str, lines: List[str], *, code: int = 1) -> "typer.Exit":
-    console.console.print(console.notice_panel(f"[error]{title}[/error]", lines,
-                                               border_style="error"))
-    return typer.Exit(code=code)
-
-
-def _pip_failed(phase_name: str, what: str, rc: int, out: str) -> "typer.Exit":
-    return _fail_card(phase_name, {
-        "cause": f"pip install of {what} failed",
-        "detail": f"pip exited {rc}. The captured output is below the card.",
-        "evidence": provision.pip_error_line(out),
-        "actions": ["re-run with --verbose to watch pip live",
-                    "check disk space and network, then re-run"],
-    }, consequence="Whatever installed before this point is still in place.")
-
-
-def _install_summary(verdict, python: str, *, allow_no_ttnn: bool) -> None:
-    """Close with a claim that matches what doctor actually found."""
-    rows = [(c.name, console.fmt_version(c.version), "" if c.adequate else "missing")
-            for c in verdict.report.components]
-    if verdict.report.ok and not allow_no_ttnn:
-        console.console.print(console.ready_panel(
-            "Serving stack installed", rows,
-            [f"[muted]Serve  ·[/muted]  tt-model serve <namespace>/<model>",
-             f"[muted]Check  ·[/muted]  tt-model doctor"]))
-        return
-    lines = [f"[muted]{n:<10}[/muted] {v}" + (f"  [error]{s}[/error]" if s else "")
-             for n, v, s in rows]
-    lines += ["", "[warning]Everything this command installs is in place. What is missing "
-              "above is built separately and is out of scope here.[/warning]",
-              "", "[info]Try:[/info]",
-              f"[muted]  {python} -m pip install \"{provision.TTNN_PYPI_SPEC}\"[/muted]",
-              "[muted]  tt-model install --venv <tt-metal>/python_env[/muted]",
-              "[muted]  tt-model doctor[/muted]"]
-    console.console.print(console.notice_panel(
-        "[warning]Installed, but the stack cannot serve yet[/warning]", lines,
-        border_style="warning"))
-    raise typer.Exit(code=provision.EXIT_INADEQUATE)
-
-
 
 # ---------------------------------------------------------------------------- dev
 @dev_app.command("make-test-cache")
@@ -1749,6 +1911,20 @@ def dev_make_test_cache(
     for description, command in devtools.push_recipe(cache):
         console.console.print(f"\n[muted]{description}:[/muted]")
         console.raw(f"  {command}")
+
+# --------------------------------------------------------------------------- login
+@app.command(rich_help_panel="Environment")
+def login(
+    token: Optional[str] = typer.Option(None, help="HF token; omit for interactive login."),
+) -> None:
+    """Log in to Hugging Face (reuses HF's token store)."""
+    auth.login(token=token)
+    me = auth.whoami()
+    if me:
+        typer.secho(f"Logged in as {me.get('name')}", fg=typer.colors.GREEN)
+    else:
+        raise _err("Login did not produce a valid identity.")
+
 
 # ------------------------------------------------------------------------- doctor
 def _warn_toolchain() -> None:
@@ -1824,7 +2000,7 @@ def _report_bundle_requirements(repo_id: str, arch: Optional[str]) -> bool:
     return not unmet
 
 
-@app.command()
+@app.command(rich_help_panel="Environment")
 def doctor(
     repo_id: Optional[str] = typer.Argument(
         None, help="Optional bundle id: also report its declared platform/runtime ranges "
@@ -1832,8 +2008,9 @@ def doctor(
     ),
     arch: Optional[str] = typer.Option(None, "--arch", help="Override arch detection."),
 ) -> None:
-    """Report whether the surrounding toolchain (tt-metal, vLLM)
-    and hardware are adequate. tt-model never installs these — it only checks and warns.
+    """Report whether the surrounding toolchain (tt-metal, vLLM) and hardware are adequate.
+
+    Purely declarative: `doctor` only ever checks and reports, which is what makes its verdict a reliable description of the machine. To actually provision the stack, use `tt-model install`.
 
     With a bundle id, also resolves that bundle's v4 version ranges against the local
     environment and prints what (if anything) is out of range.
@@ -2007,6 +2184,40 @@ def _serve_activation(entry: dict, *, instance_override: Optional[str]):
     return None, {}, None
 
 
+def _serve_preflight(endpoint: str, inst_python: Optional[str]) -> None:
+    """Everything knowable before vLLM is launched, checked before anything is promised.
+
+    Two conditions, both of which previously surfaced only after the CLI had already
+    announced an endpoint — and the second only after ~18 seconds of plugin and ttnn
+    loading, as a traceback from inside vLLM.
+    """
+    # 1. Can this interpreter even serve? Check the one that will actually run (a pinned
+    # instance's, if any) — not the manager's, which may be a pipx venv with no vLLM.
+    if not runtime.vllm_available(python=inst_python):
+        where = f"the pinned instance ({inst_python})" if inst_python else "this environment"
+        raise _fail_card("Preflight", {
+            "cause": "the Tenstorrent vLLM stack is not importable",
+            "detail": f"vllm + vllm_tt_plugin are not importable in {where}, so there is "
+                      "nothing to serve the model with.",
+            "evidence": "",
+            "actions": [f"{'tt-model install':<32}# set up the serving stack",
+                        f"{'tt-model serve <id> --print':<32}# emit the command for another box"],
+        }, consequence="vLLM was not started.")
+
+    # 2. Is the port we are about to claim actually free? One syscall, versus 18 seconds of
+    # startup followed by OSError: [Errno 98] from inside vLLM.
+    port = runtime.port_of(endpoint)
+    if port is not None and runtime.port_in_use(port):
+        raise _fail_card("Preflight", {
+            "cause": f"port {port} is already in use",
+            "detail": f"Something is already listening on {port}.",
+            "evidence": "",
+            # Naming the holder is the job; killing a process tt-model does not own is not.
+            "actions": [f"{'lsof -i :' + str(port):<32}# what is holding it",
+                        f"{'tt-model serve <id> --port <n>':<32}# use another port"],
+        }, consequence="vLLM was not started.")
+
+
 def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, local_only: bool,
                 arch: Optional[str], bundles_dir: Optional[str], do_health: bool,
                 force: bool = False, instance: Optional[str] = None,
@@ -2053,6 +2264,12 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
             fg=typer.colors.YELLOW,
         )
 
+    # Preflight BEFORE announcing anything. The endpoint line used to print nine lines
+    # above the vLLM-importable check, so `serve` promised "OpenAI endpoint (once up):
+    # http://localhost:8000" and then said it could not serve at all.
+    if not print_only:
+        _serve_preflight(endpoint, inst_python)
+
     via = f"{mkey}" + (f"; instance={inst_label}" if inst_label else "")
     typer.secho(f"[vLLM: {md.arch} via {via}; EXTRA_MODELS_DIR={extra_models_dir}]",
                 fg=typer.colors.CYAN)
@@ -2063,21 +2280,13 @@ def _serve_vllm(repo_id: str, revision: Optional[str], *, print_only: bool, loca
                             **launch.env}.items())
         console.raw(f"{exports} " + " ".join(argv))
         return
-    # Check the interpreter that will actually run (the pinned instance's, if any) — not the
-    # manager's, which may be a pipx venv with no vLLM (review G3).
-    if not runtime.vllm_available(python=inst_python):
-        where = f"the pinned instance ({inst_python})" if inst_python else "this environment"
-        raise _err(
-            f"Cannot serve: the Tenstorrent vLLM stack (vllm + vllm_tt_plugin) is not importable "
-            f"in {where}. Install it (see scripts/install.sh), or use --print to emit the command."
-        )
     try:
         raise typer.Exit(code=subprocess.run(argv, env=env).returncode)
     except KeyboardInterrupt:  # graceful Ctrl-C of the served process
         raise typer.Exit(code=130)
 
 
-@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+@app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True}, rich_help_panel="Run a model")
 def serve(
     ctx: typer.Context,
     repo_id: str = typer.Argument(..., help="vLLM bundle id (namespace/name[@rev]) to serve."),
@@ -2134,7 +2343,7 @@ def serve(
                 force=force, instance=instance, extra_args=extra_args)
 
 
-@app.command()
+@app.command(rich_help_panel="Run a model")
 def run(
     repo_id: str = typer.Argument(
         ..., help="Model to run: a tt-model bundle id (namespace/name[@rev]) or a bare HF model id."
@@ -2200,7 +2409,7 @@ def run(
 
 
 # ---------------------------------------------------------------------------- info
-@app.command()
+@app.command(rich_help_panel="Get models")
 def info(
     repo_id: str = typer.Argument(..., help="Repo as namespace/name[@revision]."),
     arch: Optional[str] = typer.Option(None, "--arch", help="Override arch detection."),
@@ -2217,7 +2426,7 @@ def info(
 
 
 # ---------------------------------------------------------------------------- list
-@app.command(name="list")
+@app.command(name="list", rich_help_panel="Get models")
 def list_installed() -> None:
     """List locally installed bundles."""
     entries = localdb.all_entries()
@@ -2239,7 +2448,7 @@ def list_installed() -> None:
 
 
 # -------------------------------------------------------------------------- search
-@app.command()
+@app.command(rich_help_panel="Get models")
 def search(
     query: str = typer.Argument("", help="Free-text query over tt-model cache repos."),
     limit: int = typer.Option(50, help="Max results."),
@@ -2271,7 +2480,7 @@ def search(
 
 
 # ----------------------------------------------------------------------- publish
-@app.command()
+@app.command(rich_help_panel="Publish models")
 def publish(
     repo_id: str = typer.Argument(..., help="An already-pushed public bundle as namespace/name."),
 ) -> None:
@@ -2298,7 +2507,7 @@ def publish(
 
 
 # --------------------------------------------------------------------- unpublish
-@app.command()
+@app.command(rich_help_panel="Publish models")
 def unpublish(
     repo_id: str = typer.Argument(..., help="A listed bundle as namespace/name."),
 ) -> None:
@@ -2312,7 +2521,7 @@ def unpublish(
 
 
 # ------------------------------------------------------------------------------ rm
-@app.command()
+@app.command(rich_help_panel="Maintenance")
 def rm(
     repo_id: str = typer.Argument(..., help="Installed bundle as namespace/name."),
     cache_dir: Optional[str] = typer.Option(None, help="Override the tt-metal cache root."),
@@ -2356,7 +2565,7 @@ def rm(
 
 
 # --------------------------------------------------------------------------- clean
-@app.command()
+@app.command(rich_help_panel="Maintenance")
 def clean(
     build_key: Optional[int] = typer.Option(
         None, "--build-key", help="Remove this build_key subtree from the cache."
@@ -2416,7 +2625,7 @@ def _split_revision(repo_id: str) -> "tuple[str, Optional[str]]":
     return repo_id, None
 
 
-@app.command()
+@app.command(rich_help_panel="Maintenance")
 def version() -> None:
     """Print the tt-model version."""
     typer.echo(__version__)
