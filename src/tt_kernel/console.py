@@ -494,8 +494,9 @@ def phase(title):
             # and "0ms" next to a check invites the reader to doubt it ran at all. Below the
             # threshold, say nothing rather than something meaningless.
             tail = fmt_duration(elapsed) if elapsed >= 0.01 else ""
+        suffix = f"  [muted]{tail}[/muted]" if tail else ""
         console.print(f"{marker} [muted]Phase {index}/{total} ·[/muted] "
-                      f"[bold accent]{title}[/bold accent]  [muted]{tail}[/muted]")
+                      f"[bold accent]{title}[/bold accent]{suffix}")
         if pinned.active():
             pinned.repaint()
 
@@ -733,22 +734,32 @@ def set_no_color(value=True):
 
 
 def check_table():
-    """A borderless table for check/verdict rows (`doctor`, install's Verify).
+    """A borderless table for check/verdict rows (`doctor`, install's Verify, `start`).
 
     Rich owns the column widths here rather than f-string padding: a version like
     `0.1.dev14190+g24516a94b.empty` is 29 characters and blew a hand-padded layout onto a
     wrapped line, which is exactly the unreadable run-on this replaces.
+
+    Rows come in through `check_row()`, which puts the verdict glyph in the SAME cell as
+    the label it judges. As its own column the glyph sat a full column-gap from its label
+    and read as floating — and collapsing the padding to fix that flattened the gap between
+    every other column too, so the rows read as sentences instead of a table.
     """
-    table = Table(box=None, show_header=False, pad_edge=False, padding=(0, 1), expand=False)
+    table = Table(box=None, show_header=False, pad_edge=False, padding=(0, 2),
+                  expand=False, collapse_padding=True)
     # Column priority matters on a narrow terminal. Rich shrinks columns to fit, and left
     # to itself it squeezed the verdict glyph away entirely at COLUMNS=40 — losing the one
-    # character the row exists to convey. So the glyph and the component name are fixed,
-    # and the requirement column is the only one allowed to give: it folds, then truncates.
-    table.add_column(no_wrap=True, min_width=1, width=1)               # ✓ / ✗ / !
-    table.add_column(no_wrap=True, min_width=4)                        # component
+    # character the row exists to convey. So the verdict+name column is fixed, and the
+    # requirement column is the only one allowed to give: it folds, then truncates.
+    table.add_column(no_wrap=True, min_width=6)                        # ✓/✗/! + component
     table.add_column(no_wrap=True, overflow="ellipsis", max_width=18)  # what we found
-    table.add_column(style="muted", overflow="fold", ratio=1, min_width=0)  # requirement
+    table.add_column(style="muted", overflow="fold", max_width=48)     # requirement
     return table
+
+
+def check_row(table, mark, name, found="", need=""):
+    """Add one verdict row. `mark` is the glyph markup (or "" for an unjudged fact)."""
+    table.add_row(f"{mark} {name}" if mark else name, found, need)
 
 
 def print_table(table, indent=2):
@@ -757,8 +768,11 @@ def print_table(table, indent=2):
     Indent via Padding, never by prefixing spaces onto the strings: a hand-indented cell
     loses its indent the moment Rich wraps it, which is how a "requires numpy>=2" note
     ended up starting at column 0 on its second line.
+
+    Width-capped like every other piece of furniture, so a wide terminal does not stretch
+    the rows (and their trailing whitespace) across the screen.
     """
-    console.print(Padding(table, (0, 0, 0, indent)))
+    console.print(Padding(table, (0, 0, 0, indent)), width=rule_width())
 
 
 def hint(text, indent=4):

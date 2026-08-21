@@ -372,11 +372,12 @@ def start(
             env = start_mod.validate(port, arch_override=arch)
             tbl = console.check_table()
             for c in env.report.components:
-                tbl.add_row("[success]✓[/success]" if c.adequate else "[error]✗[/error]",
-                            c.name, console.fmt_version(c.version),
-                            f"require >= {c.required}")
-            tbl.add_row("[success]✓[/success]" if env.port_free else "[error]✗[/error]",
-                        f"port {env.port}", "free" if env.port_free else "in use", "")
+                console.check_row(
+                    tbl, "[success]✓[/success]" if c.adequate else "[error]✗[/error]",
+                    c.name, console.fmt_version(c.version), f"require >= {c.required}")
+            console.check_row(
+                tbl, "[success]✓[/success]" if env.port_free else "[error]✗[/error]",
+                f"port {env.port}", "free" if env.port_free else "in use")
             console.print_table(tbl)
             for c in env.conflicts:
                 console.note(c.message, marker="!", style="warning")
@@ -390,9 +391,10 @@ def start(
     # asking twice could report two different device counts within one run.
     with console.phase("Hardware") as ph:
         tbl = console.check_table()
-        tbl.add_row("[success]✓[/success]" if env.arch else "[warning]![/warning]",
-                    env.arch or "no device", f"{env.device_count} device(s)",
-                    f"via {env.device_source}" if env.device_source else "")
+        console.check_row(
+            tbl, "[success]✓[/success]" if env.arch else "[warning]![/warning]",
+            env.arch or "no device", f"{env.device_count} device(s)",
+            f"via {env.device_source}" if env.device_source else "")
         console.print_table(tbl)
         if not env.arch:
             # Not a blocker: --print needs no card, and the mesh check that really matters
@@ -565,12 +567,15 @@ def install(
             pre = provision.check(venv, vllm_ref=vllm_ref, allow_no_ttnn=allow_no_ttnn)
             tbl = console.check_table()
             mark = "[success]✓[/success]" if pre.target.usable else "[error]✗[/error]"
-            tbl.add_row(mark, "python", _short_path(pre.target.python), pre.target.source)
+            console.check_row(tbl, mark, "python", _short_path(pre.target.python),
+                              pre.target.source)
             if pre.target.usable:
-                tbl.add_row("[success]✓[/success]" if pre.ttnn_ok else "[warning]![/warning]",
-                            "ttnn", "importable" if pre.ttnn_ok else "not importable",
-                            "the tt-metal runtime")
-            tbl.add_row("[success]✓[/success]", "vllm ref", vllm_ref, "tenstorrent/vllm")
+                console.check_row(
+                    tbl, "[success]✓[/success]" if pre.ttnn_ok else "[warning]![/warning]",
+                    "ttnn", "importable" if pre.ttnn_ok else "not importable",
+                    "the tt-metal runtime")
+            console.check_row(tbl, "[success]✓[/success]", "vllm ref", vllm_ref,
+                              "tenstorrent/vllm")
             console.print_table(tbl)
             if not pre.ok:
                 raise _PreflightFailed()
@@ -2045,9 +2050,9 @@ def dev_make_test_cache(
     cache = devtools.make_test_cache(root, build_key, with_runner=with_runner)
     console.console.print(f"[success]✓[/success] synthetic cache at {cache.base}")
     tbl = console.check_table()
-    tbl.add_row("", "build_key", str(cache.build_key), "")
-    tbl.add_row("", "kernels", str(cache.kernel_count), "")
-    tbl.add_row("", "files", str(cache.file_count), "")
+    console.check_row(tbl, "", "build_key", str(cache.build_key))
+    console.check_row(tbl, "", "kernels", str(cache.kernel_count))
+    console.check_row(tbl, "", "files", str(cache.file_count))
     console.print_table(tbl)
     if cache.wheel:
         # A filename in the fixed-width "found" column gets ellipsised, which is useless
@@ -2173,9 +2178,9 @@ def doctor(
         mark = "[success]✓[/success]" if c.adequate else "[error]✗[/error]"
         # Keep the full version under --verbose: the git hash is what you need when you
         # are actually chasing a version skew.
-        table.add_row(mark, c.name,
-                      console.fmt_version(c.version, keep_local=console.is_verbose()),
-                      f"require >= {c.required}")
+        console.check_row(table, mark, c.name,
+                          console.fmt_version(c.version, keep_local=console.is_verbose()),
+                          f"require >= {c.required}")
     console.print_table(table)
     for c in report.components:
         if not c.adequate:
@@ -2192,8 +2197,8 @@ def doctor(
     console.console.print("\n[bold accent]Hardware[/bold accent]")
     if dev.arch:
         hw = console.check_table()
-        hw.add_row("[success]✓[/success]", dev.arch, f"{dev.device_count} device(s)",
-                   f"via {dev.source}")
+        console.check_row(hw, "[success]✓[/success]", dev.arch,
+                          f"{dev.device_count} device(s)", f"via {dev.source}")
         console.print_table(hw)
     else:
         console.note("no Tenstorrent device detected (tt-smi/ARCH_NAME unavailable)",
@@ -2209,8 +2214,9 @@ def doctor(
         console.console.print("\n[bold accent]Environment[/bold accent]")
         env = console.check_table()
         for c in conflicts:
-            env.add_row("[warning]![/warning]", c.package, c.installed or "not installed",
-                        f"requires {c.requirement}")
+            console.check_row(env, "[warning]![/warning]", c.package,
+                              c.installed or "not installed",
+                              f"requires {c.requirement}")
         console.print_table(env)
         console.hint("harmless if the TT serving path never imports these — but if serving "
                      "fails on an import, start here")
