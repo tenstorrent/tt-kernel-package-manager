@@ -539,7 +539,9 @@ def _render_lines(renderable, width):
     buf = io.StringIO()
     tmp = Console(theme=THEME, highlight=False, soft_wrap=False, width=width, file=buf,
                   force_terminal=True if console.is_terminal else None,
-                  no_color=not console.is_terminal)
+                  # Inherit no_color, don't infer it: NO_COLOR on a real tty leaves
+                  # is_terminal True, so inferring would re-add the styling Rich stripped.
+                  no_color=console.no_color or not console.is_terminal)
     tmp.print(renderable)
     return buf.getvalue().rstrip("\n").split("\n")
 
@@ -802,7 +804,7 @@ def print_table(table, indent=2):
 
 def hint(text, indent=4):
     """A muted continuation line under a row or table — no marker, indent preserved on wrap."""
-    console.print(Padding(Text(text, style="muted"), (0, 0, 0, indent)))
+    _body_print(Padding(Text(text, style="muted"), (0, 0, 0, indent)))
 
 
 def fmt_version(version, keep_local=False):
