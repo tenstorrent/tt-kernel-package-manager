@@ -304,6 +304,12 @@ These rules mirror the verified tt-metal source: cache root in `rtoptions.cpp` /
 `build.cpp`, layout in `jit_compile_server.cpp`, `build_key` in `build_env_manager.cpp`,
 and the per-kernel hash in `program_descriptors.cpp`.
 
+For a **self-contained (v5)** bundle the host's tt-metal is irrelevant — the engine ships in
+the bundle — but the shipped wheels still have to load on the host's glibc. Build the engine
+wheel on the oldest target OS (Ubuntu 22.04) so one bundle serves 22.04 and 24.04 alike; see
+**[docs/self_contained_packages.md](docs/self_contained_packages.md)** →
+*Build the engine wheel on Ubuntu 22.04*.
+
 ## Cache location
 
 Resolved exactly as tt-metal does: `TT_METAL_CACHE` → `$HOME/.cache/tt-metal-cache/` →

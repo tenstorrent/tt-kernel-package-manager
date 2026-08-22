@@ -31,6 +31,37 @@ repo (the "running folder"): `wheels/`, `metal/`, `install.sh`, `run.sh`, a per-
 `tt_kernel_manifest.json`. If you omit `--max-num-seqs`/`--block-size`, the launcher defaults to
 32/64 (the known-good tt_transformers values).
 
+#### Build the engine wheel on Ubuntu 22.04
+
+`auditwheel repair` tags a wheel for the glibc of the box it was **repaired on**, and it can
+only pick the lowest floor the compiled symbols already permit — it vendors libraries and
+rewrites RPATH, it does not recompile `_ttnncpp.so`. A ttnn wheel built on Ubuntu 24.04
+(glibc 2.39) therefore becomes `manylinux_2_39` and **will not load on Ubuntu 22.04**
+(glibc 2.35): the consumer dies at `dlopen` with `version 'GLIBC_2.39' not found`, and no
+flag can lower the tag after the fact.
+
+We target both releases, so build the engine wheel on the **oldest** one:
+
+| Wheel built on | Repaired tag | Loads on 22.04 | Loads on 24.04 |
+|---|---|---|---|
+| Ubuntu 22.04 (glibc 2.35) | `manylinux_2_35` | yes | yes |
+| Ubuntu 24.04 (glibc 2.39) | `manylinux_2_39` | **no** | yes |
+
+One wheel built on 22.04 covers both hosts. Building on 24.04 quietly turns a
+"self-contained" bundle into a 24.04-only artifact — the folder is complete, it just cannot
+load on half the fleet.
+
+Assert the floor at package time rather than finding out on someone else's box:
+
+```bash
+tt-model package ... --manylinux manylinux_2_35
+```
+
+`auditwheel` then fails fast if the wheel needs anything newer, instead of silently emitting
+a narrower tag. `pull` independently compares each shipped wheel's floor against the host
+glibc and refuses with the fix in the message — *"needs glibc >= 2.39, host has 2.35 —
+repackage on Ubuntu 22.04"* — instead of letting it crash at load.
+
 ### Consumer — pull + serve (only a card + firmware required)
 ```bash
 tt-model pull  <org>/<model-name>     # installs the shipped wheels into the bundle's OWN venv,
